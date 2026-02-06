@@ -2,6 +2,7 @@
 # One per line. Comments and blank lines are ignored.
 .config/opencode/skills
 .config/opencode/opencode.json
+.config/opencode/AGENTS.md
 .gemini/settings.json
 .gemini/skills
 .gemini/GEMINI.md
