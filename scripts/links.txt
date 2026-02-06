@@ -1,0 +1,4 @@
+# Paths relative to repo home/ to symlink into $HOME
+# One per line. Comments and blank lines are ignored.
+.config/opencode/skills
+.config/opencode/opencode.json
