@@ -2,3 +2,5 @@
 # One per line. Comments and blank lines are ignored.
 .config/opencode/skills
 .config/opencode/opencode.json
+.gemini/settings.json
+.gemini/skills

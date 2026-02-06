@@ -1,0 +1,19 @@
+{
+  "general": {
+    "preferredEditor": "vim",
+    "previewFeatures": true
+  },
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal"
+    }
+  },
+  "ui": {
+    "theme": "Atom One"
+  },
+  "experimental": {
+    "skills": true
+  },
+  "theme": "Atom One",
+  "selectedAuthType": "oauth-personal"
+}
