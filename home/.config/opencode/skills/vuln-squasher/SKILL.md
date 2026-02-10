@@ -21,3 +21,13 @@ If this is a Gradle project:
 When you are done (the code compiles and all tests pass), print out a list of
 the CVEs that were remediated, their severity, and the dependency that was
 updated to remediate it.
+
+Finally, create a commit and use the GitHub MCP server to create a Pull
+Request against master or main branch for the repo you are currently working
+in, including the actions taken and vulnerabilities that were remediated.
+
+Use the following commit and PR title template:
+
+```
+(chore): Remediate vulnerabilities in <INSERT_PROJECT_NAME>
+```
