@@ -12,5 +12,32 @@
       "template": "!git branch",
       "description": "List all git branches",
     }
+  },
+  "mcp": {
+    "sonatype-guide": {
+      "type": "remote",
+      "url": "https://mcp.guide.sonatype.com/mcp",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:SONATYPE_GUIDE_KEY}"
+      }
+    },
+    "synk-mcp": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "snyk@latest",
+        "mcp",
+        "-t",
+        "stdio"
+      ],
+      "enabled": true,
+      "environment": {
+        "SNYK_TOKEN": "{env:SNYK_TOKEN}",
+        "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
+      }
+    }
   }
 }
