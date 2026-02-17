@@ -3,6 +3,7 @@
   "username": "Andrew",
   "default_agent": "plan",
   "model": "github-copilot/gpt-5.2-codex",
+  "autoupdate": "notify",
   "command": {
     "branch": {
       "template": "Run `git checkout $1` or `git checkout -b $1` if the first command fails.",
