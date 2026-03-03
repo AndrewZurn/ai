@@ -27,7 +27,7 @@
     "sonatype-guide": {
       "type": "remote",
       "url": "https://mcp.guide.sonatype.com/mcp",
-      "enabled": true,
+      "enabled": false,
       "oauth": false,
       "headers": {
         "Authorization": "Bearer {env:SONATYPE_GUIDE_KEY}"
