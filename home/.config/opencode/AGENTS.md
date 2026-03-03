@@ -8,3 +8,6 @@ Rules:
 - Use repo tooling and documented workflows; avoid destructive commands.
 - Read and plan before you write; keep edits minimal and localized.
 - Ask targeted questions to ensure you all necessary context.
+- HTTP/Web handling (request/response, status codes handling, etc.) should always
+  be done in the controller layer.
+- If the implementation plan is sufficiently complex, always include a test plan.
