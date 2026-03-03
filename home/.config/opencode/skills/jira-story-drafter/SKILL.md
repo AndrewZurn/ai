@@ -7,12 +7,19 @@ description: Expertise in creating Jira story tickets to define new features in 
 
 ## Purpose
 
-Create clear, implementation-ready Jira stories for Connection Hub endpoint work. The output must be Jira Markdown and include the required sections in the correct order.
+Create clear, implementation-ready Jira stories for new features in a health data platform using Jira Markdown syntax and include the required sections in the correct order. Ensure that there is an extra line between all header lines (h1., h2., etc.). Review the content of the ticket with the user, and then offer to do one of the following:
+
+- Offer to write the content to a file.
+- Offer to create the ticket on a Jira instance using the `jira cli` tool. Ask the user what the project ID is, and then use the following command:
+
+```bash
+jira issue create --project <PROJECT> --type Story --summary <STORY_SUMMARY> --body <TICKET_CONTENT>
+```
 
 ## Required Sections (in order)
 
 1. `h2. User Story`
-2. `h2. Acceptance Criteria`
+2. `h2. Acceptance Criteria` (Scenarios)
 3. `h2. Technical Details`
 
 ## User Story Guidelines
@@ -29,7 +36,6 @@ Create clear, implementation-ready Jira stories for Connection Hub endpoint work
   - Happy path for the feature
   - Access control cases for the feature (scope/claims/token auth, etc.)
   - Edge cases for the feature, including graceful degradation if possible.
-  - Timeout scenario: provider timeout during fan-out results in partial response (only successful providers).
 
 ## Technical Details Content
 
@@ -46,11 +52,11 @@ Include concise bullets covering:
 - Prefer explicit paths in scenarios (e.g., `/v1/connections`, `/v1/users/{userId}/connections`).
 - Do not include implementation code.
 
-## Example Snippet (Acceptance Criteria)
+## Example Scenario (Acceptance Criteria)
 
 ```
-h3. Scenario: Access list of connections via /v1 with fan-out
-*Given* a valid bearer token and either X-Account-Id header or JWT sub
-*When* the client calls GET /v1/connections
-*Then* the hub fans out to all configured providers in parallel and returns 200 with a merged connections array
+h3. Scenario: Access user info
+*Given* a valid bearer token and the user exists in the system
+*When* the client calls GET /v1/user
+*Then* the API returns the user info with a status code 200
 ```
