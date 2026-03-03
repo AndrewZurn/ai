@@ -1,5 +1,6 @@
 # Paths relative to repo home/ to symlink into $HOME
 # One per line. Comments and blank lines are ignored.
+.config/opencode/agent
 .config/opencode/skills
 .config/opencode/opencode.json
 .config/opencode/AGENTS.md
