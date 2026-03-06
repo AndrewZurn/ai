@@ -49,7 +49,7 @@ Include concise bullets covering:
 ## Style Rules
 
 - Use concise, implementation-focused language.
-- Prefer explicit paths in scenarios (e.g., `/v1/connections`, `/v1/users/{userId}/connections`).
+- Prefer explicit paths in scenarios (e.g., `/v1/users`, `/v1/users/{userId}`).
 - Do not include implementation code.
 
 ## Example Scenario (Acceptance Criteria)
