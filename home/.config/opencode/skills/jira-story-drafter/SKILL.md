@@ -10,10 +10,39 @@ description: Expertise in creating Jira story tickets to define new features in 
 Create clear, implementation-ready Jira stories for new features in a health data platform using Jira Markdown syntax and include the required sections in the correct order. Ensure that there is an extra line between all header lines (h1., h2., etc.). Review the content of the ticket with the user, and then offer to do one of the following:
 
 - Offer to write the content to a file.
-- Offer to create the ticket on a Jira instance using the `jira cli` tool. Ask the user what the project ID is, and then use the following command:
+- Offer to create the ticket on a Jira instance using the `jira cli` tool. Ask the user what the project ID is, and then create the ticket using `--template -` with a HEREDOC instead of trying to inline the full body via `--body`.
 
 ```bash
-jira issue create --project <PROJECT> --type Story --summary <STORY_SUMMARY> --body <TICKET_CONTENT>
+jira issue create \
+  --project <PROJECT> \
+  --type Story \
+  --summary "<STORY_SUMMARY>" \
+  --template - <<'EOF'
+<TICKET_CONTENT>
+EOF
+```
+
+## Jira CLI Creation Guidance
+
+- Prefer `--template - <<'EOF'` for multiline ticket bodies. This is the most reliable way to preserve Jira Markdown and avoid shell-quoting failures.
+- Do not use deeply nested shell quoting like `--body "$(cat <<'EOF' ... )"` for full ticket bodies. It is fragile and can fail with unmatched quotes.
+- If you need to set fix versions, include `--fix-version "<FIX_VERSION>"` in the command.
+- If the content must be reviewed or reused before creation, use a temporary file and pass it with `--template "$tmpfile"`.
+- On macOS, prefer `mktemp -t jira-story` over Linux-style `mktemp /tmp/jira-story.XXXXXX.md`.
+
+Reliable temp-file fallback:
+
+```bash
+tmpfile="$(mktemp -t jira-story)" &&
+cat > "$tmpfile" <<'EOF'
+<TICKET_CONTENT>
+EOF
+jira issue create \
+  --project <PROJECT> \
+  --type Story \
+  --summary "<STORY_SUMMARY>" \
+  --template "$tmpfile"
+rm -f "$tmpfile"
 ```
 
 ## Required Sections (in order)
