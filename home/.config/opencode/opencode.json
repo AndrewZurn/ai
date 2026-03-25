@@ -39,7 +39,7 @@
         "-t",
         "stdio"
       ],
-      "enabled": true,
+      "enabled": false,
       "environment": {
         "SNYK_TOKEN": "{env:SNYK_TOKEN}",
         "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
