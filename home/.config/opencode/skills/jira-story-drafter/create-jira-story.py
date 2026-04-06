@@ -13,6 +13,7 @@ Usage:
 
     Optionally add:
         --fix-version "1.0"
+        --epic-link "PROJ-123"
         --label bug --label urgent
         --priority High
 
@@ -28,6 +29,26 @@ import urllib.request
 import urllib.error
 
 
+def fetch_json(url, token):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
+
+
+def resolve_epic_link_field_id(server, token):
+    fields = fetch_json(f"{server}/rest/api/2/field", token)
+    for field in fields:
+        if field.get("name") == "Epic Link":
+            return field["id"]
+    raise RuntimeError("Could not resolve Jira field id for 'Epic Link'")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create a Jira Story via REST API.")
     parser.add_argument("--server", required=True, help="Jira server URL (e.g. https://jira.example.com)")
@@ -35,6 +56,7 @@ def main():
     parser.add_argument("--summary", required=True, help="Issue summary / title")
     parser.add_argument("--body-file", required=True, help="Path to file containing the description in Jira wiki markup")
     parser.add_argument("--fix-version", action="append", default=[], help="Fix version (repeatable)")
+    parser.add_argument("--epic-link", default=None, help="Epic issue key to link this story to")
     parser.add_argument("--label", action="append", default=[], help="Label (repeatable)")
     parser.add_argument("--priority", default=None, help="Priority name (e.g. High)")
     args = parser.parse_args()
@@ -43,6 +65,8 @@ def main():
     if not token:
         print("Error: JIRA_API_TOKEN environment variable is not set.", file=sys.stderr)
         sys.exit(1)
+
+    server = args.server.rstrip("/")
 
     with open(args.body_file) as f:
         description = f.read()
@@ -56,12 +80,13 @@ def main():
 
     if args.fix_version:
         fields["fixVersions"] = [{"name": v} for v in args.fix_version]
+    if args.epic_link:
+        fields[resolve_epic_link_field_id(server, token)] = args.epic_link
     if args.label:
         fields["labels"] = args.label
     if args.priority:
         fields["priority"] = {"name": args.priority}
 
-    server = args.server.rstrip("/")
     payload = json.dumps({"fields": fields})
 
     req = urllib.request.Request(

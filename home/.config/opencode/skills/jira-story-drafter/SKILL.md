@@ -31,6 +31,7 @@ python3 create-jira-story.py \
   --server <JIRA_SERVER_URL> \
   --project <PROJECT> \
   --summary "<STORY_SUMMARY>" \
+  --epic-link "<EPIC_KEY>" \
   --body-file "$tmpfile"
 
 rm -f "$tmpfile"
@@ -39,8 +40,11 @@ rm -f "$tmpfile"
 The script also accepts optional flags:
 
 - `--fix-version "<VERSION>"` (repeatable)
+- `--epic-link "<EPIC_KEY>"`
 - `--label "<LABEL>"` (repeatable)
 - `--priority "<PRIORITY>"`
+
+When the user provides an epic, pass it directly with `--epic-link` during ticket creation instead of creating the issue first and patching the Epic Link afterward.
 
 ## Required Sections (in order)
 
