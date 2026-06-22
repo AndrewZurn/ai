@@ -1,0 +1,28 @@
+{
+  "agents": {
+    "loom": {
+      "model": "github-copilot/gpt-5.5"
+    },
+    "pattern": {
+      "model": "github-copilot/gpt-5.5"
+    },
+    "warp": {
+      "model": "github-copilot/gpt-5.5"
+    },
+    "tapestry": {
+      "model": "github-copilot/gpt-5.4"
+    },
+    "weft": {
+      "model": "github-copilot/gpt-5.4"
+    },
+    "shuttle": {
+      "model": "github-copilot/gpt-5.4"
+    },
+    "thread": {
+      "model": "github-copilot/gpt-5.4-mini"
+    },
+    "spindle": {
+      "model": "github-copilot/gpt-5.4-mini"
+    }
+  }
+}

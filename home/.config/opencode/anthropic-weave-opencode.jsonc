@@ -1,0 +1,28 @@
+{
+  "agents": {
+    "loom": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "pattern": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "warp": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "tapestry": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "weft": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "shuttle": {
+      "model": "github-copilot/claude-opus-4.8"
+    },
+    "thread": {
+      "model": "github-copilot/claude-sonnet-4.6"
+    },
+    "spindle": {
+      "model": "github-copilot/claude-sonnet-4.6"
+    }
+  }
+}
