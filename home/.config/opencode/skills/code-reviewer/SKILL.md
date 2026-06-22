@@ -15,19 +15,20 @@ general praise.
 
 When reviewing code, follow this workflow:
 
-1.  **Analyze**: Review the staged changes or specific files provided. Ensure
-    that the changes are scoped properly and represent minimal changes required
-    to address the issue.
-2.  **Style**: Ensure code follows the project's conventions and idiomatic
-    patterns as described in the `GEMINI.md` file.
-3.  **Security**: Flag any potential security vulnerabilities.
-4.  **Tests**: Verify that new logic has corresponding test coverage and that
-    the test coverage adequately validates the changes.
-5.  **Design**: Identify unnecessary coupling, unclear boundaries, duplicated
-    logic, weak abstractions, dead code, and places where a smaller change would
-    reduce future maintenance cost.
-6.  **Runtime Behavior**: Consider error handling, edge cases, observability,
-    data validation, concurrency, backwards compatibility, and performance.
+1. **Analyze**: Review the staged changes or specific files of folders provided.
+   If there are no staged changes or specific files or folders requested by
+   the user, review the entire repository. Ensure that the changes are scoped
+   properly and represent minimal changes required to address the issue.
+2. **Style**: Ensure code follows the project's conventions and idiomatic
+   patterns as described in the `AGENTS.md` file.
+3. **Security**: Flag any potential security vulnerabilities.
+4. **Tests**: Verify that new logic has corresponding test coverage and that
+   the test coverage adequately validates the changes.
+5. **Design**: Identify unnecessary coupling, unclear boundaries, duplicated
+   logic, weak abstractions, dead code, and places where a smaller change would
+   reduce future maintenance cost.
+6. **Runtime Behavior**: Consider error handling, edge cases, observability,
+   data validation, concurrency, backwards compatibility, and performance.
 
 ## Output Format
 
