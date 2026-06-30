@@ -8,3 +8,5 @@
 .gemini/settings.json
 .gemini/skills
 .gemini/GEMINI.md
+.codex/AGENTS.md
+.codex/skills
