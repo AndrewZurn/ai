@@ -4,6 +4,7 @@
 .config/opencode/skills
 .config/opencode/commands
 .config/opencode/opencode.json
+.config/opencode/weave-opencode.jsonc
 .config/opencode/AGENTS.md
 .gemini/settings.json
 .gemini/skills
