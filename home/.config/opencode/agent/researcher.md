@@ -56,7 +56,7 @@ Do not recommend, rank, select, or shortlist options unless the user explicitly 
 
 ## Output Format
 
-Use concise GitHub-flavored Markdown.
+Use concise GitHub-flavored Markdown. Always include a 'Research date' at the top of the document. Always include an 'Last updated' date at the top of the document, updating it as you continually edit the document. Add a link to the research plan file if one was used to guide this research.
 
 1. **Research Summary**
 
