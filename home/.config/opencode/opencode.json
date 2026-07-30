@@ -2,47 +2,47 @@
   "$schema": "https://opencode.ai/config.json",
   "username": "Andrew",
   "default_agent": "plan",
-  "model": "github-copilot/gpt-5.4",
-  "autoupdate": "notify",
   "agent": {
-    "title": {
-      "model": "github-copilot/gpt-5-mini"
+    "build": {
+      "model": "opencode-go/kimi-k2.7-code",
+    },
+    "plan": {
+      "mode": "primary",
+      "model": "opencode-go/kimi-k2.7-code",
     }
   },
+  "autoupdate": "notify",
+  "formatter": true,
+  "experimental": {
+    "disable_paste_summary": true
+  },
+  "plugin": ["@opencode_weave/weave"],
   "command": {
-    "branch": {
-      "template": "Run `git checkout $1` or `git checkout -b $1` if the first command fails.",
-      "description": "Checkout a git branch",
-    },
-    "branch-list": {
-      "template": "!git branch",
-      "description": "List all git branches",
+    "spdd-help": {
+      "description": "Print out the typical SPDD workflow steps",
+      "template": "Print out the following verbetum, no additional commentary needed: Here is the typical steps for an SPDD workflow:\n\n# Step 1: Strategic analysis (recommended for complex features)\n/spdd-analysis @requirements/user-registration.md\n\n# Step 2: Generate REASONS Canvas from analysis\n/spdd-reasons-canvas @spdd/analysis/xxx.md\n\n# Step 3: Generate code from REASONS Canvas\n/spdd-generate @spdd/prompt/xxx.md\n\n# Step 4: After code review/refactoring, sync changes back\n/spdd-sync @spdd/prompt/xxx.md"
     }
   },
-  "mcp": {
-    "sonatype-guide": {
-      "type": "remote",
-      "url": "https://mcp.guide.sonatype.com/mcp",
-      "enabled": false,
-      "oauth": false,
-      "headers": {
-        "Authorization": "Bearer {env:SONATYPE_GUIDE_KEY}"
-      }
-    },
-    "synk-mcp": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "snyk@latest",
-        "mcp",
-        "-t",
-        "stdio"
-      ],
-      "enabled": false,
-      "environment": {
-        "SNYK_TOKEN": "{env:SNYK_TOKEN}",
-        "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
+  "provider": {
+    "llamacpp_local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "unsloth/gemma-4-26B-A4B-it-GGUF:Q3_K_M": {
+          "name": "Gemma 4 Q3_K_M (26B)"
+        },
+        "google/gemma-4-12B-it-qat-q4_0-gguf": {
+          "name": "Gemma 4 12B"
+        },
+        "JetBrains/Mellum2-12B-A2.5B-Thinking-GGUF-Q4_K_M:Q4_K_M": {
+          "name": "Mellum2 (Thinking)"
+        },
+        "JetBrains/Mellum2-12B-A2.5B-Instruct-GGUF-Q4_K_M:Q4_K_M": {
+          "name": "Mellum2 (Instruct)"
+        }
       }
     }
   }
