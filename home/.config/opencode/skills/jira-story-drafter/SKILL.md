@@ -17,7 +17,7 @@ Create clear, implementation-ready Jira stories for new features in a health dat
 Requirements:
 
 - The environment variable `JIRA_API_TOKEN` must contain a valid bearer token (PAT).
-- The Jira server URL can be read from `~/.config/.jira/.config.yml` (look for the `server:` key) or asked from the user.
+- The environment variable `JIRA_BASE_URL` will contain be set and used for accessing the server.
 
 Write the ticket description to a temp file, then invoke the script:
 
@@ -59,7 +59,7 @@ When the user provides an epic, pass it directly with `--epic-link` during ticke
 
 ## Acceptance Criteria Format
 
-- Use Gherkin-style scenarios.
+- Unless the user asks for an alternative format (ie. they ask for simple bullet points), use Gherkin-style scenarios.
 - Each scenario title is an `h3.` header.
 - Each Given/When/Then/And keyword is bolded (e.g., `*Given*`).
 - Each Gherkin keyword MUST start a new line. Keep the full clause on that single line — do not wrap mid-sentence.

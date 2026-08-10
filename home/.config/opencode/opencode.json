@@ -2,48 +2,150 @@
   "$schema": "https://opencode.ai/config.json",
   "username": "Andrew",
   "default_agent": "plan",
+  "model": "github-copilot/gpt-5.5",
+  "autoupdate": "notify",
   "agent": {
     "build": {
-      "model": "opencode-go/kimi-k2.7-code",
+      "model": "github-copilot/gpt-5.4-mini"
     },
     "plan": {
-      "mode": "primary",
-      "model": "opencode-go/kimi-k2.7-code",
+      "model": "github-copilot/gpt-5.5"
+    },
+    "title": {
+      "model": "github-copilot/gpt-5.4-mini"
     }
   },
-  "autoupdate": "notify",
-  "formatter": true,
   "experimental": {
     "disable_paste_summary": true
   },
-  "plugin": ["@opencode_weave/weave"],
-  "command": {
-    "spdd-help": {
-      "description": "Print out the typical SPDD workflow steps",
-      "template": "Print out the following verbetum, no additional commentary needed: Here is the typical steps for an SPDD workflow:\n\n# Step 1: Strategic analysis (recommended for complex features)\n/spdd-analysis @requirements/user-registration.md\n\n# Step 2: Generate REASONS Canvas from analysis\n/spdd-reasons-canvas @spdd/analysis/xxx.md\n\n# Step 3: Generate code from REASONS Canvas\n/spdd-generate @spdd/prompt/xxx.md\n\n# Step 4: After code review/refactoring, sync changes back\n/spdd-sync @spdd/prompt/xxx.md"
-    }
-  },
   "provider": {
-    "llamacpp_local": {
+    "openai": {
+      "options": {
+        "headerTimeout": 120000,
+        "timeout": 600000,
+        "chunkTimeout": 120000
+      }
+    },
+    "mlx": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "llama-server (local)",
+      "name": "MLX (local)",
+      "options": {
+        "baseURL": "http://localhost:8080/v1"
+      },
+      "models": {
+        "default_model": {
+          "name": "Default MLX Model"
+        }
+      }
+    },
+    "local-llama": {
       "options": {
         "baseURL": "http://127.0.0.1:8080/v1"
       },
       "models": {
-        "unsloth/gemma-4-26B-A4B-it-GGUF:Q3_K_M": {
-          "name": "Gemma 4 Q3_K_M (26B)"
+        "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M": {
+          "id": "gemma-4 fable distilled"
+        }
+      }
+    },
+    "litellm": {
+      "models": {
+        "gpt-5.2": {
+          "name": "Gpt 5.2"
         },
-        "google/gemma-4-12B-it-qat-q4_0-gguf": {
-          "name": "Gemma 4 12B"
+        "gpt-5.6-terra": {
+          "name": "Gpt 5.6 Terra"
         },
-        "JetBrains/Mellum2-12B-A2.5B-Thinking-GGUF-Q4_K_M:Q4_K_M": {
-          "name": "Mellum2 (Thinking)"
+        "gpt-5.6-sol": {
+          "name": "Gpt 5.6 Sol"
         },
-        "JetBrains/Mellum2-12B-A2.5B-Instruct-GGUF-Q4_K_M:Q4_K_M": {
-          "name": "Mellum2 (Instruct)"
+        "gpt-5.6": {
+          "name": "Gpt 5.6"
+        },
+        "gpt-5": {
+          "name": "Gpt 5"
+        },
+        "gemini-3.5-flash-lite": {
+          "name": "Gemini 3.5 Flash Lite"
+        },
+        "vertex_ai/claude-opus-4-8": {
+          "name": "Claude Opus 4 8 (Vertex AI)"
+        },
+        "gpt-5.6-luna": {
+          "name": "Gpt 5.6 Luna"
+        },
+        "vertex_ai/claude-sonnet-4-6": {
+          "name": "Claude Sonnet 4 6 (Vertex AI)"
+        },
+        "gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro"
+        },
+        "gemini-3.6-flash": {
+          "name": "Gemini 3.6 Flash"
+        },
+        "gpt-4": {
+          "name": "Gpt 4"
+        },
+        "vertex_ai/claude-haiku-4-5": {
+          "name": "Claude Haiku 4 5 (Vertex AI)"
+        },
+        "gpt-4-turbo": {
+          "name": "Gpt 4 Turbo"
+        },
+        "gpt-5.2-pro": {
+          "name": "Gpt 5.2 Pro"
+        },
+        "gpt-5.1": {
+          "name": "Gpt 5.1"
+        },
+        "gpt-4.1": {
+          "name": "Gpt 4.1"
+        },
+        "gpt-5.5": {
+          "name": "Gpt 5.5"
+        },
+        "gemini-3-pro-preview": {
+          "name": "Gemini 3 Pro Preview"
         }
       }
     }
-  }
+  },
+  "mcp": {
+    "synk": {
+      "type": "local",
+      "enabled": false,
+      "command": [
+        "npx",
+        "-y",
+        "snyk@latest",
+        "mcp",
+        "-t",
+        "stdio"
+      ],
+      "environment": {
+        "SNYK_TOKEN": "{env:SNYK_TOKEN}",
+        "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
+      }
+    },
+    "lucid": {
+      "type": "local",
+      "enabled": false,
+      "command": [
+        "npx",
+        "-y",
+        "mcp-remote",
+        "https://mcp.lucid.app/mcp"
+      ]
+    },
+    "datadog": {
+      "type": "remote",
+      "enabled": false,
+      "url": "https://mcp.datadoghq.com/v1/mcp?referrer_ide=opencode-plugin&plugin_version=0.7.13&toolsets=all",
+      "oauth": {}
+    }
+  },
+  "plugin": [
+    "@opencode_weave/weave",
+    "/Users/andrewzurn/.config/opencode/plugins/opencode-litellm-refresh/index.ts"
+  ]
 }
