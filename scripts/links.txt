@@ -6,6 +6,8 @@
 .config/opencode/opencode.json
 .config/opencode/weave-opencode.jsonc
 .config/opencode/AGENTS.md
+.config/opencode-v2
+.local/bin/opencode2-v2
 .gemini/settings.json
 .gemini/skills
 .gemini/GEMINI.md
