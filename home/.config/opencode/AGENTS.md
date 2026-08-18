@@ -12,4 +12,5 @@ Rules:
   should always be done in the controller layer.
 - If the implementation plan is sufficiently complex, always include a test plan.
 - No running `npm`, `npx`, `uv`, `pip`, `pipx`, `brew`, `curl`, `wget` or `bash` commands that download and run packages or scripts from the internet without explicit user permission.
-- No running commands that may mutate state on the system without explicit user permission.
+- Do not run commands that may mutate state on the system without explicit user permission.
+- Do not use the Researcher agent as a subagent unless asked to.
