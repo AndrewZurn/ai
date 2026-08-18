@@ -1,28 +1,28 @@
 {
   "agents": {
     "loom": {
-      "model": "openapi/gpt-5.6-sol"
+      "model": "openai/gpt-5.6-sol"
     },
     "pattern": {
-      "model": "openapi/gpt-5.6-sol"
+      "model": "openai/gpt-5.6-sol"
     },
     "warp": {
-      "model": "openapi/gpt-5.6-sol"
+      "model": "openai/gpt-5.6-sol"
     },
     "tapestry": {
-      "model": "openapi/gpt-5.6-terra"
+      "model": "openai/gpt-5.6-terra"
     },
     "weft": {
-      "model": "openapi/gpt-5.6-terra"
+      "model": "openai/gpt-5.6-terra"
     },
     "shuttle": {
-      "model": "openapi/gpt-5.6-terra"
+      "model": "openai/gpt-5.6-terra"
     },
     "thread": {
-      "model": "openapi/gpt-5.6-terra"
+      "model": "openai/gpt-5.6-terra"
     },
     "spindle": {
-      "model": "openapi/gpt-5.6-terra"
+      "model": "openai/gpt-5.6-terra"
     }
   }
 }
