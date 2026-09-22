@@ -3,6 +3,7 @@
 .config/opencode/agent
 .config/opencode/skills
 .config/opencode/commands
+.config/opencode/plugins
 .config/opencode/opencode.json
 .config/opencode/weave-opencode.jsonc
 .config/opencode/AGENTS.md
