@@ -1,28 +1,28 @@
 {
-  "agents": {
+"agents": {
     "loom": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "opencode-go/kimi-k3"
     },
     "pattern": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "opencode-go/kimi-k3"
     },
     "warp": {
-      "model": "openai/gpt-5.6-sol"
+      "model": "opencode-go/kimi-k3"
     },
     "tapestry": {
-      "model": "openai/gpt-5.6-terra"
+      "model": "opencode-go/deepseek-v4-pro"
     },
     "weft": {
-      "model": "openai/gpt-5.6-terra"
+      "model": "opencode-go/glm-5.2"
     },
     "shuttle": {
-      "model": "openai/gpt-5.6-terra"
+      "model": "opencode-go/gpt-5.6-luna"
     },
     "thread": {
-      "model": "openai/gpt-5.6-terra"
+      "model": "opencode-go/gpt-5.6-luna"
     },
     "spindle": {
-      "model": "openai/gpt-5.6-terra"
+      "model": "opencode-go/gpt-5.6-luna"
     }
   }
 }

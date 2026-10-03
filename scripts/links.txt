@@ -9,6 +9,7 @@
 .config/opencode/AGENTS.md
 .config/opencode-v2
 .local/bin/opencode2-v2
+.local/bin/opencode-v2
 .gemini/settings.json
 .gemini/skills
 .gemini/GEMINI.md

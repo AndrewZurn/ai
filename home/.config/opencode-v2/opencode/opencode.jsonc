@@ -5,23 +5,13 @@
   "autoupdate": "notify",
   "agents": {
     "build": {
-      "model": "openai/gpt-5.6-luna"
+      "model": "opencode-go/gpt-5.6-luna"
     },
     "plan": {
-      "model": "openai/gpt-6-astra"
-    },
-    "title": {
-      "model": "github-copilot/gpt-5.4-mini"
+      "model": "opencode-go/kimi-k3"
     }
   },
   "providers": {
-    "openai": {
-      "settings": {
-        "headerTimeout": 120000,
-        "timeout": 600000,
-        "chunkTimeout": 120000
-      }
-    },
     "mlx": {
       "package": "aisdk:@ai-sdk/openai-compatible",
       "name": "MLX (local)",
@@ -43,6 +33,6 @@
           "modelID": "gemma-4 fable distilled"
         }
       }
-    }
+    },
   }
 }

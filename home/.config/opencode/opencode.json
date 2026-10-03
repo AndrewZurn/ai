@@ -2,36 +2,20 @@
   "$schema": "https://opencode.ai/config.json",
   "username": "Andrew",
   "default_agent": "plan",
-  "model": "openai/gpt-5.6-sol",
   "autoupdate": "notify",
   "agent": {
     "build": {
-      "model": "openai/gpt-5.6-luna"
+      "model": "opencode-go/gpt-5.6-luna",
     },
     "plan": {
-      "model": "openai/gpt-6-astra"
-    },
-    "explore": {
-      "model": "openai/gpt-5.6-luna"
-    },
-    "general": {
-      "model": "openai/gpt-5.6-luna"
-    },
-    "title": {
-      "model": "github-copilot/gpt-5.4-mini"
+      "mode": "primary",
+      "model": "opencode-go/kimi-k3",
     }
   },
   "experimental": {
     "disable_paste_summary": true
   },
   "provider": {
-    "openai": {
-      "options": {
-        "headerTimeout": 120000,
-        "timeout": 600000,
-        "chunkTimeout": 120000
-      }
-    },
     "mlx": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "MLX (local)",
@@ -51,67 +35,6 @@
       "models": {
         "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M": {
           "id": "gemma-4 fable distilled"
-        }
-      }
-    },
-    "litellm": {
-      "models": {
-        "gpt-5.2": {
-          "name": "Gpt 5.2"
-        },
-        "gpt-5.6-terra": {
-          "name": "Gpt 5.6 Terra"
-        },
-        "gpt-5.6-sol": {
-          "name": "Gpt 5.6 Sol"
-        },
-        "gpt-5.6": {
-          "name": "Gpt 5.6"
-        },
-        "gpt-5": {
-          "name": "Gpt 5"
-        },
-        "gemini-3.5-flash-lite": {
-          "name": "Gemini 3.5 Flash Lite"
-        },
-        "vertex_ai/claude-opus-4-8": {
-          "name": "Claude Opus 4 8 (Vertex AI)"
-        },
-        "gpt-5.6-luna": {
-          "name": "Gpt 5.6 Luna"
-        },
-        "vertex_ai/claude-sonnet-4-6": {
-          "name": "Claude Sonnet 4 6 (Vertex AI)"
-        },
-        "gemini-2.5-pro": {
-          "name": "Gemini 2.5 Pro"
-        },
-        "gemini-3.6-flash": {
-          "name": "Gemini 3.6 Flash"
-        },
-        "gpt-4": {
-          "name": "Gpt 4"
-        },
-        "vertex_ai/claude-haiku-4-5": {
-          "name": "Claude Haiku 4 5 (Vertex AI)"
-        },
-        "gpt-4-turbo": {
-          "name": "Gpt 4 Turbo"
-        },
-        "gpt-5.2-pro": {
-          "name": "Gpt 5.2 Pro"
-        },
-        "gpt-5.1": {
-          "name": "Gpt 5.1"
-        },
-        "gpt-4.1": {
-          "name": "Gpt 4.1"
-        },
-        "gpt-5.5": {
-          "name": "Gpt 5.5"
-        },
-        "gemini-3-pro-preview": {
-          "name": "Gemini 3 Pro Preview"
         }
       }
     }
@@ -149,9 +72,5 @@
       "url": "https://mcp.datadoghq.com/v1/mcp?referrer_ide=opencode-plugin&plugin_version=0.7.13&toolsets=all",
       "oauth": {}
     }
-  },
-  "plugin": [
-    //"@opencode_weave/weave",
-    "/Users/andrewzurn/.config/opencode/plugins/opencode-litellm-refresh/index.ts"
-  ]
+  }
 }
