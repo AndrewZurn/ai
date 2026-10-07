@@ -1,0 +1,7 @@
+# GitHub repositories to seed under /root/src.
+# Use owner/repo for GitHub, or an SSH clone URL for another host.
+# Repository names must be unique because clones use /root/src/<repo>.
+AndrewZurn/ai
+AndrewZurn/hope-notes
+AndrewZurn/zfit
+AndrewZurn/dev-days-talk-2026

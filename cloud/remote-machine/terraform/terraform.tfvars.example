@@ -1,0 +1,10 @@
+hetzner_token      = "replace-me"
+hetzner_ssh_key_id = 12345678
+tailscale_auth_key = "tskey-auth-replace-me"
+
+# Optional overrides:
+# server_name = "remote-devbox"
+# server_label = "remote-devbox"
+# location = "hil"
+# server_type = "cpx31"
+# initial_image = "ubuntu-24.04"

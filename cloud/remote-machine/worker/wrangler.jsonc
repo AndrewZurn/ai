@@ -1,0 +1,36 @@
+{
+	"name": "remote-devbox-control",
+	"main": "src/index.js",
+	"compatibility_date": "2026-10-06",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"head_sampling_rate": 1
+		}
+	},
+	"vars": {
+		"BASIC_AUTH_USERNAME": "admin",
+		"SERVER_LABEL": "remote-devbox",
+		"SERVER_NAME": "remote-devbox",
+		"LOCATION": "hil",
+		"SERVER_TYPE": "cpx31",
+		"PRIMARY_IP_ID": "153943661",
+		"SNAPSHOT_PREFIX": "remote-devbox-nightly",
+		"IDLE_CPU_PERCENT": "5",
+		"IDLE_MINUTES": "60"
+	},
+	"kv_namespaces": [
+		{
+			"binding": "REMOTE_DEVBOX_STATE",
+			"id": "2e3f7aa5536442d0bb35125aa12df5f7"
+		}
+	],
+	"triggers": {
+		"crons": [
+			"*/5 * * * *"
+		]
+	}
+}
