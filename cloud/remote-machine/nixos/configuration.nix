@@ -46,6 +46,7 @@
         ${pkgs.tailscale}/bin/tailscale up \
           --auth-key="$(cat /root/tailscale-auth-key)" \
           --hostname=remote-devbox \
+          --accept-dns=false \
           --ssh
         rm -f /root/tailscale-auth-key
       fi
@@ -96,7 +97,7 @@
     script = ''
       set -u
       export HOME=/root
-      export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts"
+      export GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts"
 
       repos_file=/etc/remote-machine/repos.txt
       src_root=/root/src

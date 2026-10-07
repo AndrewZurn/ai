@@ -66,6 +66,8 @@ nixos-rebuild switch \
 
 The NixOS configuration uses `nixos-26.05` and enables flakes and `nix-ld`. Do not run Terraform after the Worker takes over lifecycle management. Deploy NixOS changes before creating a new snapshot so future `/start` operations receive them.
 
+The host opts out of Tailscale-provided DNS because the configured tailnet DNS servers are not reachable from this machine. Tailscale connectivity still works, but tailnet MagicDNS names will not resolve on the devbox; use IPs or configure reachable DNS if that is needed.
+
 Herdr and OpenCode are upstream Linux binaries, not currently Nix packages in this configuration. The `remote-tools` systemd service installs them into `/root` and installs the Herdr OpenCode integration. The base tools (`curl`, `jq`, and `tmux`) are managed declaratively by Nix in `configuration.nix`; Git and the commit identity are configured through the NixOS Git module.
 
 The `seed-repos` systemd service reads `nixos/repos.txt` and clones repositories into `/root/src/<repo>` on boot. Existing clones only run `git fetch --prune`; the service does not change checked-out branches or working trees. Add one `owner/repo` per line (or an SSH clone URL for another host), rebuild, then run `systemctl restart seed-repos` to apply list changes immediately. Entries are never deleted from disk when removed from the list, and repository names must be unique because the clone directory is based on the final path segment. The list must be committed to Git for Nix flakes to include it.
