@@ -1,0 +1,8 @@
+{
+  "name": "opencode-go-usage",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx"
+  }
+}
