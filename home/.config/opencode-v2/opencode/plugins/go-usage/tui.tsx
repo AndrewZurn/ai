@@ -236,6 +236,7 @@ export default Plugin.define({
           title: "OpenCode Go usage",
           group: "Go",
           palette: true,
+          suggested: true,
           slash: { name: "go-usage" },
           enabled: () => true,
           run: async () => showPopup(),
