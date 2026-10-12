@@ -10,5 +10,9 @@
     "scrollbar": true,
     "thinking": "show"
   },
-  "animations": true
+  "animations": true,
+  "tabs": {
+    "layout": "vertical",
+    "mode": "on"
+  }
 }
