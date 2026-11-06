@@ -27,11 +27,31 @@ function readJsonFile(filePath) {
 }
 
 /**
+ * Extract the OpenCode Go API key from a server credential listing
+ * (GET /api/credential / `context.client.credential.list()`).
+ *
+ * `/connect` → OpenCode Go stores its key as a server credential with
+ * `integrationID: "opencode-go"`, not in auth.json. Accepts the client
+ * response envelope `{ data: [...] }` or a bare array for tests.
+ */
+export function pickCredentialKey(json) {
+  const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : [];
+  for (const row of rows) {
+    const entry = row && typeof row === "object" ? row : undefined;
+    if (entry?.integrationID !== "opencode-go" || entry.active === false) continue;
+    const key = entry.value && typeof entry.value === "object" ? entry.value.key : undefined;
+    if (typeof key === "string" && key.trim()) return key.trim();
+  }
+  return undefined;
+}
+
+/**
  * Discover the OpenCode Go API key.
  *
- * Order: OPENCODE_GO_API_KEY env → opencode's auth.json. The auth entry
- * has the shape { "opencode-go": { type: "api", key: "sk-..." } } and is
- * written by /connect → OpenCode Go.
+ * Order: OPENCODE_GO_API_KEY env → opencode's auth.json files (**legacy**
+ * fallback; V2 keeps /connect credentials server-side — see
+ * pickCredentialKey). The auth entry
+ * has the shape { "opencode-go": { type: "api", key: "sk-..." } }.
  *
  * Overridable via `env` and `homedir` for tests.
  */

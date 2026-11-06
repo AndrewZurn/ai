@@ -15,14 +15,16 @@ in the TUI footer.
 
 ## Authentication
 
-The plugin reads the OpenCode Go API key in this order:
+The plugin resolves the OpenCode Go API key in this order:
 
 1. `OPENCODE_GO_API_KEY`
-2. `~/.local/share/opencode/auth.json`
-3. `~/.config/opencode/auth.json`
+2. `~/.local/share/opencode/auth.json` and `~/.config/opencode/auth.json`
+   (legacy `/connect` format, `{ "opencode-go": { type: "api", key } }`)
+3. The OpenCode server's credential store — where V2's `/connect` →
+   OpenCode Go saves the key (looked up via `context.client.credential.list()`)
 
-The auth file is populated by `/connect` when you connect OpenCode Go and
-contains an `opencode-go` entry.
+The auth files are only written by the V1 client; V2 stores credentials
+server-side, so on V2 the key comes from the credential store.
 
 ## Usage
 
@@ -52,8 +54,14 @@ Pure helper tests use Node's built-in test runner:
 node --test test/usage-core.test.js
 ```
 
-The plugin is loaded from the v2 OpenCode plugin directory:
+The plugin source lives at:
 
 ```text
 ~/.config/opencode-v2/opencode/plugins/go-usage/
+```
+
+and is symlinked into the active plugin directory for discovery:
+
+```text
+~/.config/opencode/plugins/go-usage
 ```

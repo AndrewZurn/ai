@@ -7,9 +7,10 @@
 //
 // Data source: GET https://opencode.ai/zen/go/v1/usage (official endpoint,
 // added via opencode#16513; public docs tracked in opencode#31084) with the
-// opencode-go API key from opencode's auth.json. Key discovery and response
-// parsing live in ./lib/usage-core.js; fetch orchestration (timeouts,
-// status-code handling) stays here.
+// opencode-go API key: env → auth.json → the server credential stored by
+// /connect (V2). Key discovery and response parsing live in
+// ./lib/usage-core.js; fetch orchestration (timeouts, status-code
+// handling) stays here.
 //
 // Rendering is intentionally monochrome: verified theme-token names for
 // success/warning/error colors are not documented, so text uses defaults
@@ -23,6 +24,7 @@ import {
   discoverApiKey,
   formatCountdown,
   parseUsageApi,
+  pickCredentialKey,
 } from "./lib/usage-core.js"
 
 const USAGE_URL = process.env.OPENCODE_GO_USAGE_URL || "https://opencode.ai/zen/go/v1/usage"
@@ -100,7 +102,19 @@ export default Plugin.define({
       if (inFlight) return inFlight
       inFlight = (async () => {
         try {
-          const key = discoverApiKey()
+          // Key order: env → auth.json files → the server credential
+          // the /connect → OpenCode Go flow stores (V2 keeps it there,
+          // not in auth.json).
+          let key = discoverApiKey()
+          if (!key) {
+            try {
+              const listed = await context.client.credential.list()
+              key = pickCredentialKey(listed)
+            } catch {
+              // The server credential lookup is best-effort; the caller
+              // sees the plain no-key error below if everything fails.
+            }
+          }
           if (!key) {
             const result = {
               rolling: null,

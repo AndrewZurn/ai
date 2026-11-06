@@ -11,6 +11,7 @@ import {
   discoverApiKey,
   formatCountdown,
   parseUsageApi,
+  pickCredentialKey,
   renderBar,
 } from "../lib/usage-core.js"
 
@@ -148,4 +149,41 @@ test("discoverApiKey prefers env override, then recovers from missing files", ()
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ─── pickCredentialKey ──────────────────────────────────────────────────────
+
+test("pickCredentialKey takes the active opencode-go server credential", () => {
+  const listed = {
+    data: [
+      {
+        id: "cred_other",
+        integrationID: "opencode",
+        active: true,
+        value: { type: "api", key: "sk-wrong" },
+      },
+      {
+        id: "cred_go",
+        integrationID: "opencode-go",
+        label: "OpenCode Go",
+        active: true,
+        value: { type: "key", key: " sk-connect " },
+      },
+    ],
+  }
+  assert.equal(pickCredentialKey(listed), "sk-connect")
+})
+
+test("pickCredentialKey skips inactive credentials and returns undefined on other shapes", () => {
+  assert.equal(
+    pickCredentialKey({
+      data: [
+        { integrationID: "opencode-go", active: false, value: { key: "sk-off" } },
+      ],
+    }),
+    undefined,
+  )
+  assert.equal(pickCredentialKey(undefined), undefined)
+  assert.equal(pickCredentialKey({ data: "nope" }), undefined)
+  assert.equal(pickCredentialKey([]), undefined)
 })
