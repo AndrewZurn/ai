@@ -1,6 +1,7 @@
 {
   "theme": {
-    "name": "vercel"
+    "name": "vercel",
+    "mode": "dark"
   },
   "diffs": {
     "wrap": "word"
