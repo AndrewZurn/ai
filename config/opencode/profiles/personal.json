@@ -1,0 +1,30 @@
+{
+  "description": "OpenCode Go and local inference",
+  "allowed_providers": ["opencode-go", "mlx", "local-llama", "ollama", "lmstudio", "vllm"],
+  "config": {
+    "model": "opencode-go/glm-5.3",
+    "agents": {
+      "build": { "model": "opencode-go/glm-5.3-flash" },
+      "plan": { "model": "opencode-go/glm-5.3" },
+      "adversarial-reviewer": { "model": "opencode-go/glm-5.3" }
+    },
+    "providers": {
+      "mlx": {
+        "package": "aisdk:@ai-sdk/openai-compatible",
+        "name": "MLX (local)",
+        "settings": { "baseURL": "http://localhost:8080/v1" },
+        "models": {
+          "default_model": { "name": "Default MLX Model" }
+        }
+      },
+      "local-llama": {
+        "settings": { "baseURL": "http://127.0.0.1:8080/v1" },
+        "models": {
+          "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M": {
+            "modelID": "gemma-4 fable distilled"
+          }
+        }
+      }
+    }
+  }
+}

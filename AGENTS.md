@@ -10,6 +10,9 @@ It is intentionally small and script-driven.
 - `scripts/retired-links.txt` lists obsolete repository-owned symlinks.
 - `scripts/link-home.sh` backs up replaced/retired paths and creates symlinks.
 - `scripts/check-links.sh` verifies link targets.
+- `config/opencode/` contains common settings and machine profiles.
+- `scripts/opencode-profile.mjs` builds local OpenCode config; `oc2 --setup`
+  selects a machine profile. See README.md's **OpenCode 2** section before editing.
 
 ## Build / Lint / Test
 
@@ -24,6 +27,8 @@ Use the scripts below as the primary validation mechanisms.
   - `./scripts/check-links.sh`
 - Test link migration in an isolated temporary home:
   - `bash scripts/test-links.sh`
+- Test OpenCode profiles and the launcher in isolated temporary homes:
+  - `node --test scripts/opencode-profile.test.mjs`
 - Test the OpenCode Go usage plugin with Node's built-in runner:
   - `node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js`
 
@@ -71,7 +76,7 @@ existing scripts and keep changes minimal.
 
 ### Imports / Dependencies
 
-- No external dependencies are declared.
+- OpenCode profile setup requires Node.js 22+ and no external Node packages.
 - Scripts rely on standard Unix tools (`bash`, `readlink`, `mkdir`, `mv`, `ln`).
 - If adding new tool usage, ensure it exists on macOS (darwin).
 
@@ -108,6 +113,13 @@ existing scripts and keep changes minimal.
 - Retire only symlinks whose exact targets belong to this checkout; leave
   unmanaged retired paths untouched.
 - OpenCode 2 uses `home/.config/opencode/`; do not restore the isolated V2 tree.
+- OpenCode's `opencode.jsonc` and `oc2-profile.json` are generated local files,
+  not managed symlinks. Never add them to `scripts/links.txt` or commit them.
+- Keep shared agent files model-neutral; assign models in machine profiles.
+- Keep explicit provider allowlists in each profile. Work permits only OpenAI
+  and Copilot; profile policy rules must not weaken that boundary.
+- New profiles are discovered from `config/opencode/profiles/*.json`; do not
+  hard-code profile names in scripts. Update README.md and tests for new features.
 - Do not remove or overwrite a user’s files without backing them up.
 - Keep link logic idempotent: re-running should be safe.
 

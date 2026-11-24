@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export NODE_EXTRA_CA_CERTS="/Library/Application Support/Netskope/STAgent/data/nscacert.pem"
+# Resolve the installed symlink so setup also works before linking this file.
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "${script_path}" ]]; do
+  script_dir=$(cd -P "$(dirname "${script_path}")" && pwd)
+  script_path=$(readlink "${script_path}")
+  if [[ "${script_path}" != /* ]]; then
+    script_path="${script_dir}/${script_path}"
+  fi
+done
+repo_root=$(cd "$(dirname "${script_path}")/../../.." && pwd)
+profile_script="${repo_root}/scripts/opencode-profile.mjs"
+
+case "${1:-}" in
+  --setup|--list-profiles|--profile-status)
+    exec node "${profile_script}" "$@"
+    ;;
+esac
+
+# This checks saved settings, but never configures or switches the machine.
+ca_file=$(node "${profile_script}" --ca-file)
+if [[ -n "${ca_file}" && -f "${ca_file}" && -z "${NODE_EXTRA_CA_CERTS+x}" ]]; then
+  export NODE_EXTRA_CA_CERTS="${ca_file}"
+fi
 exec opencode2 "$@"

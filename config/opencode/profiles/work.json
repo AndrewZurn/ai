@@ -1,0 +1,42 @@
+{
+  "description": "OpenAI and GitHub Copilot only",
+  "allowed_providers": ["openai", "github-copilot"],
+  "launcher": {
+    "ca_file": "/Library/Application Support/Netskope/STAgent/data/nscacert.pem"
+  },
+  "config": {
+    "model": "openai/gpt-6.1-sol",
+    "agents": {
+      "build": { "model": "openai/gpt-6.1-sol#high" },
+      "plan": { "model": "openai/gpt-6.1-sol#high" },
+      "adversarial-reviewer": { "model": "openai/gpt-6-astra#xhigh" }
+    },
+    "policies": [
+      { "action": "plugin.use", "resource": "*go-usage*", "effect": "deny" }
+    ],
+    "mcp": {
+      "servers": {
+        "synk": {
+          "type": "local",
+          "disabled": true,
+          "command": ["npx", "-y", "snyk@latest", "mcp", "-t", "stdio"],
+          "environment": {
+            "SNYK_TOKEN": "{env:SNYK_TOKEN}",
+            "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
+          }
+        },
+        "lucid": {
+          "type": "local",
+          "disabled": true,
+          "command": ["npx", "-y", "mcp-remote", "https://mcp.lucid.app/mcp"]
+        },
+        "datadog": {
+          "type": "remote",
+          "disabled": true,
+          "url": "https://mcp.datadoghq.com/v1/mcp?referrer_ide=opencode-plugin&plugin_version=0.7.13&toolsets=all",
+          "oauth": {}
+        }
+      }
+    }
+  }
+}

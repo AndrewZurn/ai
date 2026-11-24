@@ -4,7 +4,6 @@
 .config/opencode/skills
 .config/opencode/commands
 .config/opencode/plugins
-.config/opencode/opencode.jsonc
 .config/opencode/cli.json
 .config/opencode/AGENTS.md
 .local/bin/oc2
