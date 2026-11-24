@@ -10,6 +10,8 @@
 .config/opencode-v2
 .local/bin/opencode2-v2
 .local/bin/opencode-v2
+.local/bin/oc2
+.local/bin/oc2-restart-service
 .gemini/settings.json
 .gemini/skills
 .gemini/GEMINI.md

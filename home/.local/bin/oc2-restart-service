@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This binds to a local address, not necessarily a trusted home network.
+if command -v oc2 >/dev/null 2>&1; then
+  opencode_command=oc2
+elif command -v opencode2 >/dev/null 2>&1; then
+  opencode_command=opencode2
+else
+  printf "Error: Neither 'oc2' nor 'opencode2' was found.\n" >&2
+  exit 1
+fi
+
+# Read assigned IPv4 addresses, excluding broadcast and peer addresses.
+if command -v ip >/dev/null 2>&1; then
+  network_addresses=$(ip -4 addr show up)
+elif command -v ifconfig >/dev/null 2>&1; then
+  network_addresses=$(ifconfig)
+else
+  printf "Error: Neither 'ip' nor 'ifconfig' was found.\n" >&2
+  exit 1
+fi
+
+local_ip=$(printf '%s\n' "${network_addresses}" | awk '
+  $1 == "inet" {
+    split($2, address, "/")
+    if (address[1] ~ /^192[.]168[.]/ && !seen[address[1]]++) {
+      print address[1]
+    }
+  }
+')
+
+if [[ -z "${local_ip}" ]]; then
+  printf "Error: Could not detect a 192.168.x.x local IP address.\n" >&2
+  exit 1
+fi
+
+if [[ "${local_ip}" == *$'\n'* ]]; then
+  printf "Error: Multiple 192.168.x.x local IP addresses found; refusing to choose:\n%s\n" \
+    "${local_ip}" >&2
+  exit 1
+fi
+
+printf "Detected local IP: %s\n" "${local_ip}"
+"${opencode_command}" service set hostname "${local_ip}"
+"${opencode_command}" service restart
+printf "OpenCode hostname updated to %s and service started.\n" "${local_ip}"
