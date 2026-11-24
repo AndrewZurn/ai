@@ -7,12 +7,13 @@ It is intentionally small and script-driven.
 
 - `home/` mirrors `$HOME` paths that should be linked.
 - `scripts/links.txt` lists paths (relative to `home/`) to link.
-- `scripts/link-home.sh` creates backups and symlinks.
+- `scripts/retired-links.txt` lists obsolete repository-owned symlinks.
+- `scripts/link-home.sh` backs up replaced/retired paths and creates symlinks.
 - `scripts/check-links.sh` verifies link targets.
 
 ## Build / Lint / Test
 
-There is no build system, linter, or unit test framework detected.
+There is no repository-wide build system, linter, or test framework.
 Use the scripts below as the primary validation mechanisms.
 
 ### Primary Commands
@@ -21,10 +22,14 @@ Use the scripts below as the primary validation mechanisms.
   - `./scripts/link-home.sh`
 - Check link status:
   - `./scripts/check-links.sh`
+- Test link migration in an isolated temporary home:
+  - `bash scripts/test-links.sh`
+- Test the OpenCode Go usage plugin with Node's built-in runner:
+  - `node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js`
 
 ### Single-Test Equivalents
 
-There is no test runner. The closest single-check workflow is:
+For a read-only check of the installed links:
 
 - Validate link status only:
   - `./scripts/check-links.sh`
@@ -98,8 +103,11 @@ existing scripts and keep changes minimal.
 ## Repository-Specific Practices
 
 - The `home/` directory mirrors `$HOME`.
-- Symlinks are created into `$HOME` and backed up under
-  `.link-backups/<timestamp>` in the repo root.
+- Symlinks are created into `$HOME` and backed up under a unique
+  `.link-backups/<timestamp>-<suffix>/` directory, preserving relative paths.
+- Retire only symlinks whose exact targets belong to this checkout; leave
+  unmanaged retired paths untouched.
+- OpenCode 2 uses `home/.config/opencode/`; do not restore the isolated V2 tree.
 - Do not remove or overwrite a user’s files without backing them up.
 - Keep link logic idempotent: re-running should be safe.
 

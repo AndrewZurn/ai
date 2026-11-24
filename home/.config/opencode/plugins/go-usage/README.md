@@ -57,11 +57,8 @@ node --test test/usage-core.test.js
 The plugin source lives at:
 
 ```text
-~/.config/opencode-v2/opencode/plugins/go-usage/
+~/.config/opencode/plugins/go-usage/
 ```
 
-and is symlinked into the active plugin directory for discovery:
-
-```text
-~/.config/opencode/plugins/go-usage
-```
+This is the active plugin directory; no separate V2 tree or plugin symlink is
+needed.

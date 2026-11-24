@@ -4,7 +4,7 @@ description: >-
   completed changes against the task and returns a severity-ordered list of
   real defects. Never edits files.
 mode: subagent
-model: opencode-go/deepseek-v4-pro#high
+model: openai/gpt-6-astra#xhigh
 steps: 40
 permissions:
   # Last matching rule wins: broad denies first, narrow git allows after.

@@ -1,4 +1,5 @@
 {
+  "$schema": "https://opencode.ai/v2/cli.json",
   "theme": {
     "name": "vercel",
     "mode": "dark"
@@ -12,6 +13,16 @@
     "thinking": "show"
   },
   "animations": true,
+  "prompt": {
+    "paste": "compact",
+    "image_preview": false
+  },
+  "terminal": {
+    "copy": "select"
+  },
+  "debug": {
+    "turn_tokens": false
+  },
   "tabs": {
     "layout": "vertical",
     "mode": "on"
