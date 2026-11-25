@@ -1,20 +1,26 @@
 // CLI plugin for opencode: shows OpenAI Codex (ChatGPT) plan usage.
 //
 // 1. `/openai-usage` slash + palette command opens a popup with the Codex
-//    rate-limit windows (5-hour rolling and weekly on Plus/Pro) plus reset
-//    countdowns.
+//    rate-limit windows, monthly credit allowance when reported, and
+//    today/week/month token activity with its latest reporting date.
 // 2. A footer status segment (`Codex 5h 14% Wk 2%`) renders on
 //    home.footer.status. The Codex allowance is account-level (tied to the
 //    ChatGPT sign-in of the local `codex` CLI), so it shows regardless of the
 //    selected OpenCode model.
 //
-// Data source: the local `codex app-server` `account/rateLimits/read`
-// JSON-RPC method (developers.openai.com/codex/app-server), which reuses the
-// existing Codex sign-in — no API key or token handling here.
+// Data source: the local `codex app-server` account rate limits and usage
+// JSON-RPC methods, which reuse the existing Codex sign-in — no credential
+// handling here.
 
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
-import { clampPercent, formatCountdown } from "./lib/usage-core.js"
+import {
+  clampPercent,
+  formatCountdown,
+  formatCredits,
+  formatTokenUsage,
+  formatUsageSummary,
+} from "./lib/usage-core.js"
 import { queryRateLimits } from "./lib/codex.js"
 
 const FETCH_TIMEOUT_MS = 15_000
@@ -68,7 +74,7 @@ export default Plugin.define({
 
     let inFlight
 
-    // Read Codex rate limits (60s cache) and publish the result. Errors are
+    // Read Codex rate limits and token activity (60s cache). Errors are
     // surfaced through usage().error, never thrown.
     function refresh(force = false) {
       const current = usage()
@@ -112,6 +118,9 @@ export default Plugin.define({
           }
 
           const windows = data?.windows ?? []
+          const credits = formatCredits(data?.credits)
+          const individualLimit = data?.individualLimit
+          const tokenRows = data?.tokenUsage ? formatTokenUsage(data.tokenUsage) : []
           context.ui.dialog.set({ size: "large", centered: true })
           context.ui.dialog.show(
             () => (
@@ -120,6 +129,36 @@ export default Plugin.define({
                   <text>OpenAI Codex Usage</text>
                 </box>
                 {windows.map((w) => usageRow(w, wavePosition()))}
+                {individualLimit ? (
+                  <box flexDirection="column" marginBottom={1}>
+                    <text>{`Monthly credit allowance: ${clampPercent(individualLimit.remainingPercent)}% remaining`}</text>
+                    {individualLimit.used !== undefined && individualLimit.limit !== undefined ? (
+                      <text>{`${individualLimit.used} of ${individualLimit.limit} credits used`}</text>
+                    ) : null}
+                    {individualLimit.resetsAtSec !== undefined ? (
+                      <text>{`Resets ${formatCountdown(individualLimit.resetsAtSec)}`}</text>
+                    ) : null}
+                  </box>
+                ) : null}
+                {windows.length === 0 && !individualLimit && !data?.rateLimitsError ? (
+                  <box flexDirection="column" marginBottom={1}>
+                    <text>Remaining allowance not reported by Codex CLI.</text>
+                    <text>Detailed usage: https://chatgpt.com/codex/settings/usage</text>
+                  </box>
+                ) : null}
+                {data?.rateLimitsError ? <text>{`Limits unavailable: ${data.rateLimitsError}`}</text> : null}
+                {credits ? <text>{credits}</text> : null}
+                {data?.spendControlReached ? <text>Workspace spend limit reached.</text> : null}
+                {tokenRows.length > 0 ? (
+                  <box flexDirection="column" marginTop={1}>
+                    <text>Reported tokens (UTC dates; week starts Monday)</text>
+                    {tokenRows.map((row) => <text>{`${row.label.padEnd(12)}${row.value}`}</text>)}
+                    <text>{data.tokenUsage.latestDate
+                      ? `Latest reported day: ${data.tokenUsage.latestDate}`
+                      : "No dated token records returned."}</text>
+                  </box>
+                ) : null}
+                {data?.tokenUsageError ? <text>{`Token usage unavailable: ${data.tokenUsageError}`}</text> : null}
                 {data?.planType ? (
                   <box marginTop={1}>
                     <text>{`Plan: ${titleCase(data.planType)}`}</text>
@@ -165,10 +204,7 @@ export default Plugin.define({
         const s = usage()
         if (s?.error) return <text>Codex ?</text>
         if (!s?.fetchedAt) return <text>{""}</text>
-        const parts = (s.windows ?? [])
-          .map((w) => `${w.shortLabel}${clampPercent(w.percent)}%`)
-          .join(" ")
-        return <text>{`Codex ${parts}`}</text>
+        return <text>{formatUsageSummary(s)}</text>
       },
     })
 

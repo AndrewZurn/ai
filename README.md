@@ -225,7 +225,7 @@ These tests use temporary homes and require no downloads or provider requests:
 node --test scripts/opencode-profile.test.mjs
 bash scripts/test-links.sh
 node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js
-node --test home/.config/opencode/plugins/openai-usage/test/usage-core.test.js
+node --test home/.config/opencode/plugins/openai-usage/test/*.test.js
 node --test home/.config/opencode/plugins/swarm/test/*.test.js
 ```
 
