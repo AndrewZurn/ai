@@ -149,7 +149,7 @@ tools. `oc2-restart-service` remains an explicit, separate service helper.
 2. Set `description` and a non-empty, unique `allowed_providers` list of exact IDs.
 3. Under `config`, set the root `model` and the models for `build`, `plan`,
    `orchestrator`, `builder`, `adversarial-reviewer`, `test-engineer`, and
-   `specification-reviewer`. Additional agents and commands can set models too.
+   `specification-reviewer`, and `ui-design-reviewer`. Additional agents and commands can set models too.
    Every explicit model must use an allowed provider. Confirm IDs and variants
    with `/models`; do not guess them.
 4. Add provider/MCP settings under `config`, and an optional absolute
@@ -170,13 +170,18 @@ When adding profile features, update this section and the profile tests.
 #### Mandatory review swarm
 
 The opt-in `orchestrator` uses a local server plugin to dispatch a `builder`,
-then three concurrent reviewers. Completion requires explicit approval from
+then three concurrent baseline reviewers. Completion requires explicit approval from
 `adversarial-reviewer`, `test-engineer`, and `specification-reviewer` for the
-same candidate. Only a finding's owner can verify its fix or accept dismissal.
+same candidate. UI changes additionally require `ui-design-reviewer`, dispatched
+after the baseline reviewers finish to avoid shared Playwright browser conflicts.
+Both the test engineer and UI design reviewer use Playwright MCP for web UI work;
+non-web UI uses platform-appropriate checks. No UI work means no UI design agent.
+The builder records UI scope and evidence; reviewers check that classification.
+Only a finding's owner can verify its fix or accept dismissal.
 Findings first return to the orchestrator for mandatory fix/dismiss triage.
 The builder must follow those decisions; proposed dismissals still need the
 owning reviewer's agreement.
-After all three approve, the orchestrator generates a self-contained HTML
+After all required reviewers approve, the orchestrator generates a self-contained HTML
 summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
 the browser and records its path in `htmlReport`.
 

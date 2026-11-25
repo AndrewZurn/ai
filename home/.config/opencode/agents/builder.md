@@ -20,7 +20,15 @@ fixes, or supply evidence supporting an orchestrator-proposed dismissal.
 Do not change the triage decision. If it cannot be followed safely, report the
 blocker rather than claiming a fix. The owning reviewer decides whether it closes.
 
-Call swarm_candidate with summary, evidence, and a response for every open
+Classify UI work across the task in `ui.changes`: `none`, `web`, or `non-web`.
+Scope cannot be downgraded in repair rounds: web UI tasks must stay `web`,
+and non-web UI tasks must stay `non-web` or upgrade to `web`.
+Explain affected surfaces or why none apply in `ui.evidence`. For web UI include
+the local test URL, startup steps, and safe test data/access requirements.
+Reviewers need the running app for Playwright MCP checks. Do not install tools
+or start services without required permission.
+
+Call swarm_candidate with summary, evidence, ui, and a response for every open
 finding, then end your turn immediately. Do not launch agents, ask for the
 normal optional adversarial review, or declare the task complete.
 If the swarm tools are unavailable, explain the blocker and stop.

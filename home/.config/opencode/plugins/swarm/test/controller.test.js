@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SwarmController } from "../lib/controller.js";
-import { reviewers } from "../lib/protocol.js";
+import { requiredReviewers, reviewers, uiReviewer } from "../lib/protocol.js";
 
 export function fixture(options = {}) {
   const data = new Map();
@@ -105,6 +105,7 @@ export function fixture(options = {}) {
 
 export const candidateInput = responses => ({
   summary: "Implemented the task", evidence: "node --test: passed", responses: responses ?? [],
+  ui: { changes: "none", evidence: "Only parser behavior changed; no UI surfaces." },
 });
 export const reportInput = (f, overrides = {}) => ({
   candidate: f.state().candidate.id, verdict: "approve", summary: "No findings",
@@ -151,6 +152,147 @@ test("builder completes before parallel review dispatch; all three approvals are
   assert.equal(f.state().phase, "REVIEWING");
   await f.tool("report", reportInput(f), reviewers[2]);
   assert.equal(f.state().phase, "APPROVED");
+  assert.deepEqual(requiredReviewers(f.state()), reviewers);
+  assert.equal(f.state().sessions[uiReviewer], undefined);
+  assert(!f.state().jobs.some(job => job.role === uiReviewer));
+});
+
+test("UI scope and evidence are required, including an explicit no-UI reason", async () => {
+  const f = fixture();
+  await f.start();
+  for (const ui of [undefined, { changes: "web" }, { changes: "maybe", evidence: "Unknown" },
+    { changes: "none", evidence: " " }]) {
+    const input = candidateInput();
+    if (ui === undefined) delete input.ui;
+    else input.ui = ui;
+    await assert.rejects(f.tool("candidate", input, "builder"), /missing|invalid choice|cannot be empty/);
+    assert.equal(f.state().phase, "BUILDING");
+    assert.equal(f.state().round, 0);
+  }
+});
+
+for (const changes of ["web", "non-web"]) {
+  test(`${changes} UI requires a fourth approval after baseline browser work finishes`, async () => {
+    const f = fixture({ autoFinish: false });
+    await f.start();
+    const ui = { changes, evidence: "Changed settings screen. Test URL: http://localhost:3000/settings" };
+    await f.tool("candidate", { ...candidateInput(), ui }, "builder");
+    assert.deepEqual(f.state().candidate.ui, ui);
+    assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
+    await f.finish("builder");
+    assert.equal(f.deliveries.size, 4);
+    assert(!f.sessions.has(f.state().sessions[uiReviewer]), "UI reviewer not launched yet");
+    for (const role of reviewers) await f.tool("report", reportInput(f), role);
+    assert.equal(f.state().phase, "REVIEWING", "three approvals cannot complete UI review");
+    for (const role of reviewers.filter(role => role !== "test-engineer")) await f.finish(role);
+    assert(!f.state().jobs.some(job => job.role === uiReviewer), "test engineer still owns browser");
+    await f.finish("test-engineer");
+    assert.equal(f.state().jobs.at(-1).role, uiReviewer);
+    assert.equal(f.state().phase, "REVIEWING");
+    assert(f.state().jobs.filter(job => reviewers.includes(job.role)).every(job => job.finished));
+    const prompt = [...f.deliveries.values()].at(-1).text;
+    assert.match(prompt, /http:\/\/localhost:3000\/settings/);
+    assert.match(prompt, /Playwright MCP/);
+    await f.restart().reconcile();
+    assert.equal(f.state().jobs.filter(job => job.role === uiReviewer).length, 1,
+      "recovery does not duplicate the UI dispatch");
+    await f.tool("report", reportInput(f, { evidence: "Independent rendered UI review passed" }), uiReviewer);
+    assert.equal(f.state().phase, "REVIEW_HANDOFF");
+    await f.finish(uiReviewer);
+    assert.equal(f.state().phase, "APPROVED");
+    assert.equal(f.writtenReports[0].run.reports[uiReviewer].evidence,
+      "Independent rendered UI review passed");
+  });
+}
+
+for (const changes of ["web", "non-web"]) {
+  test(`${changes} UI scope and owner verification remain required across repair rounds`,
+    () => verifyUIRepair(changes));
+}
+
+async function verifyUIRepair(changes) {
+  const f = fixture();
+  await f.start();
+  await f.tool("candidate", {
+    ...candidateInput(), ui: { changes, evidence: "Changed the settings page" },
+  }, "builder");
+  await f.finish("builder");
+  for (const role of reviewers) await f.tool("report", reportInput(f), role);
+  await f.tool("report", reportInput(f, {
+    verdict: "changes_requested", findings: [{ ...finding, id: "clipped-label",
+      description: "Label is clipped on mobile", location: "/settings at 375px" }],
+  }), uiReviewer);
+  assert.equal(f.state().phase, "TRIAGING");
+  const findingID = f.state().findings[0].id;
+  assert.equal(findingID, `${uiReviewer}:clipped-label`);
+  await f.tool("triage", triageInput(f));
+  const repair = candidateInput([{
+    findingID, action: "fixed", reason: "Fixed label wrapping; checked mobile viewport",
+  }]);
+  await f.restart().reconcile();
+  const before = f.state();
+  for (const downgrade of changes === "web" ? ["none", "non-web"] : ["none"]) {
+    await assert.rejects(f.tool("candidate", {
+      ...repair, ui: { changes: downgrade, evidence: "Only the latest repair considered" },
+    }, "builder"), /UI scope cannot be downgraded/);
+    assert.deepEqual(f.state(), before, "rejected scope must not change proposals, candidate, or round");
+  }
+  await f.tool("candidate", {
+    ...repair, ui: { changes, evidence: "Settings page still changed; verified the label repair" },
+  }, "builder");
+  assert(f.state().uiReviewRequired);
+  assert.equal(f.state().candidate.ui.changes, changes);
+  await f.finish("builder");
+  await assert.rejects(f.tool("report", reportInput(f), uiReviewer), /not been dispatched/);
+  await assert.rejects(f.tool("report", reportInput(f, {
+    decisions: [{ findingID, outcome: "resolved", reason: "Not the owner" }],
+  }), "test-engineer"), /owned by this reviewer/);
+  for (const role of reviewers) await f.tool("report", reportInput(f), role);
+  assert.equal(f.state().jobs.filter(job => job.role === uiReviewer).length, 2);
+  await assert.rejects(f.tool("report", reportInput(f), uiReviewer), /open findings/);
+  await f.tool("report", reportInput(f, {
+    decisions: [{ findingID, outcome: "resolved", reason: "Verified mobile label in browser" }],
+  }), uiReviewer);
+  assert.equal(f.state().phase, "APPROVED");
+}
+
+test("missing UI reviewer is irrelevant to non-UI work but prevents UI candidate handoff", async () => {
+  const f = fixture();
+  const checked = [];
+  f.ctx.agent.get = async ({ agentID }) => {
+    checked.push(agentID);
+    if (agentID === uiReviewer) throw new Error("UI reviewer unavailable");
+    return { id: agentID };
+  };
+  await f.start();
+  assert(!checked.includes(uiReviewer));
+  await assert.rejects(f.tool("candidate", {
+    ...candidateInput(), ui: { changes: "web", evidence: "Changed a form" },
+  }, "builder"), /UI reviewer unavailable/);
+  assert.equal(f.state().phase, "BUILDING");
+  assert.equal(f.state().candidate, null);
+  assert.equal(f.state().uiReviewRequired, undefined);
+});
+
+test("denied UI reviewer dispatch and blocked UI browser checks cannot approve", async () => {
+  const f = fixture();
+  await f.start();
+  f.ctx.permission.assert = async ({ resources }) => {
+    if (resources.includes(uiReviewer)) throw new Error("UI review permission denied");
+  };
+  const input = { ...candidateInput(), ui: { changes: "web", evidence: "Changed a form" } };
+  await assert.rejects(f.tool("candidate", input, "builder"), /permission denied/);
+  assert.equal(f.state().round, 0);
+  f.ctx.permission.assert = async () => {};
+  await f.tool("candidate", input, "builder");
+  await f.finish("builder");
+  for (const role of reviewers) await f.tool("report", reportInput(f), role);
+  await f.tool("report", reportInput(f, {
+    verdict: "blocked", summary: "Playwright MCP cannot reach the test app",
+  }), uiReviewer);
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.equal(f.writtenReports.length, 0);
+  assert.equal(f.openedReports.length, 0);
 });
 
 test("an unregistered session or builder cannot forge reviewer approval", async () => {

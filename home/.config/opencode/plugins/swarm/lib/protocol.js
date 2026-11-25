@@ -1,6 +1,11 @@
 export const reviewers = [
   "adversarial-reviewer", "test-engineer", "specification-reviewer",
 ];
+export const uiReviewer = "ui-design-reviewer";
+export function requiredReviewers(run) {
+  return run.uiReviewRequired || (run.candidate?.ui && run.candidate.ui.changes !== "none")
+    ? [...reviewers, uiReviewer] : reviewers;
+}
 export const terminal = phase => ["APPROVED", "BLOCKED", "CANCELLED"].includes(phase);
 
 export function requireThat(condition, message) {
@@ -35,6 +40,7 @@ export const inputs = {
   candidate: object({
     summary: text,
     evidence: text,
+    ui: object({ changes: choice(["none", "web", "non-web"]), evidence: text }),
     responses: list(object({
       findingID: text, action: choice(["fixed", "dismiss"]), reason: text,
     })),
@@ -99,6 +105,9 @@ export function validate(schema, value, at = "input") {
 export function candidate(run, input, fingerprint) {
   requireThat(run.phase === "BUILDING", "A candidate can only be submitted while BUILDING.");
   requireThat(run.round < run.maxRounds, "Review round limit reached.");
+  requireThat((!run.uiReviewRequired || input.ui.changes !== "none") &&
+    (run.candidate?.ui?.changes !== "web" || input.ui.changes === "web"),
+  "UI scope cannot be downgraded across repair rounds. Keep web for web UI tasks and at least non-web for other UI tasks.");
   const open = run.findings.filter(finding => finding.status === "open");
   const ids = input.responses.map(response => response.findingID);
   requireThat(new Set(ids).size === ids.length && ids.length === open.length &&
@@ -113,9 +122,11 @@ export function candidate(run, input, fingerprint) {
     finding.proposal = response;
   }
   run.round += 1;
+  // Once UI work is declared, later repair rounds cannot skip its reviewer.
+  run.uiReviewRequired ||= input.ui.changes !== "none";
   run.candidate = {
     id: `${run.round}:${fingerprint.digest}`, ...fingerprint,
-    summary: input.summary, evidence: input.evidence,
+    summary: input.summary, evidence: input.evidence, ui: input.ui,
   };
   run.reports = {};
   run.phase = "HANDOFF";
@@ -174,13 +185,15 @@ export function packet(run, role) {
       candidate: run.candidate, findings: run.findings, reports: run.reports,
       triageRequest: run.triageRequest, triage: run.triage,
       reportRequest: run.reportRequest,
+      requiredReviewers: requiredReviewers(run),
     }),
+    "UI scope covers the full task, not only the latest repair. It cannot be downgraded: web must stay web; non-web may stay non-web or upgrade to web. The test engineer must repeat applicable UI/browser checks against each candidate, including after non-UI repairs.",
     role === "orchestrator" && run.phase === "REPORTING"
-      ? "All three reviewers approved the candidate and no findings remain open. Produce the mandatory HTML summary by calling swarm_report_html with reportRequest.id as request, candidate.id, a clear title, an accurate narrative summary, and limitations. Base the narrative only on the authoritative ledger. The plugin adds all reviewer evidence, triage, findings, builder responses, and owner decisions, writes under repository-root/.swarms, and opens the browser. Do not write or open files yourself. Do not call the task complete until the tool returns APPROVED and htmlReport.path; mention any browser error."
+      ? "All required reviewers approved the candidate and no findings remain open. Produce the mandatory HTML summary by calling swarm_report_html with reportRequest.id as request, candidate.id, a clear title, an accurate narrative summary, and limitations. Base the narrative only on the authoritative ledger. The plugin adds all reviewer evidence, triage, findings, builder responses, and owner decisions, writes under repository-root/.swarms, and opens the browser. Do not write or open files yourself. Do not call the task complete until the tool returns APPROVED and htmlReport.path; mention any browser error."
       : role === "orchestrator"
       ? "Triage every open finding exactly once using swarm_triage with this request ID and candidate ID, a summary, and fix/dismiss decisions with reasons. Decide validity independently against requirements and reviewer evidence. Address general review feedback in summary even if no open findings. Dismiss is a proposal only; the owning reviewer must agree. Do not edit code, submit a candidate/report, or override a reviewer."
       : role === "builder"
-      ? "Implement the task and follow orchestrator triage. For EVERY open finding, report fixed with verification evidence when directed to fix, or dismiss with supporting evidence when directed to propose dismissal. Never change the orchestrator's decision or close findings yourself. If triage cannot be followed safely, report the blocker rather than claiming a fix. Call swarm_candidate with summary, evidence, and responses, then stop."
-      : `Independently review the full candidate against the requirements. Verify your previous findings and builder responses. Call swarm_report for candidate ${run.candidate?.id}. Supply findings, decisions, evidence, and a verdict. A dismissal needs your independent agreement. Missing test evidence or required context means blocked, not approval.`,
+      ? "Implement the task and follow orchestrator triage. For EVERY open finding, report fixed with verification evidence when directed to fix, or dismiss with supporting evidence when directed to propose dismissal. Never change the orchestrator's decision or close findings yourself. If triage cannot be followed safely, report the blocker rather than claiming a fix. Call swarm_candidate with summary, evidence, ui, and responses, then stop. Classify ui.changes as none, web, or non-web based on actual UI work across the task, including behavior, layout, styles, and user-visible states, not file extensions alone. In ui.evidence explain affected surfaces or why there are no UI changes. For web UI provide the local test URL, startup instructions, and safe test data/access requirements so reviewers can use Playwright MCP. Do not install or start services without required permission."
+      : `Independently review the full candidate against the requirements, including the builder's UI classification. Report incorrect UI scope as a finding; do not silently skip required browser checks. For web UI changes the test engineer and UI design reviewer must use Playwright MCP, record actual browser evidence, and block if required access or tools are unavailable. Verify your previous findings and builder responses. Call swarm_report for candidate ${run.candidate?.id}. Supply findings, decisions, evidence, and a verdict. A dismissal needs your independent agreement. Missing test evidence or required context means blocked, not approval.`,
   ].join("\n\n");
 }

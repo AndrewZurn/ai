@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  candidate, inputs, packet, report, requireThat, reviewers, terminal, triage, validate,
+  candidate, inputs, packet, report, requireThat, requiredReviewers, reviewers,
+  terminal, triage, uiReviewer, validate,
 } from "./protocol.js";
 import { snapshot, trackedFiles } from "./snapshot.js";
 import { files, skills, uniqueFiles, uniqueSkills } from "./attachments.js";
@@ -112,7 +113,7 @@ export class SwarmController {
       ? (await this.messages(sessionID, "idle"))[0]?.id ?? previous.completionID ?? null
       : null;
     this.run.jobs.push({
-      role, kind, sessionID, id: id("msg"), text: role === "orchestrator" &&
+      role, kind, sessionID, round: this.run.round, id: id("msg"), text: role === "orchestrator" &&
         !["triage", "html_report"].includes(kind)
         ? `Swarm: ${this.run.phase}. Call swarm_status and report the authoritative outcome. ${this.run.reason ?? ""}`
         : packet(this.run, role),
@@ -142,14 +143,14 @@ export class SwarmController {
   }
 
   approvedReviews() {
-    return this.run.candidate && reviewers.every(role =>
+    return this.run.candidate && requiredReviewers(this.run).every(role =>
       this.run.reports[role]?.verdict === "approve" &&
       this.run.reports[role].candidate === this.run.candidate.id) &&
       !this.run.findings.some(finding => finding.status === "open");
   }
 
   async requestReport() {
-    requireThat(this.approvedReviews(), "HTML reporting requires three matching reviewer approvals.");
+    requireThat(this.approvedReviews(), "HTML reporting requires all required matching reviewer approvals.");
     this.run.phase = "REPORTING";
     this.run.reportRequest = {
       id: id("html"), candidate: this.run.candidate.id,
@@ -173,7 +174,7 @@ export class SwarmController {
       input.candidate === this.run.candidate.id &&
       this.run.reportRequest.requirements === this.requirementsDigest(),
     "Stale HTML report request or candidate.");
-    requireThat(this.approvedReviews(), "HTML reporting requires three matching reviewer approvals.");
+    requireThat(this.approvedReviews(), "HTML reporting requires all required matching reviewer approvals.");
     if (this.run.reportDraft) {
       requireThat(JSON.stringify(this.run.reportDraft) === JSON.stringify(input),
         "The report narrative is already recorded; retry with the same content.");
@@ -266,7 +267,7 @@ export class SwarmController {
       const digest = this.run.phase === "TRIAGING"
         ? this.run.triageRequest.digest : this.run.candidate.digest;
       if (current.digest !== digest) {
-        await this.block("Candidate contents changed. Resume to build and obtain three new approvals.");
+        await this.block("Candidate contents changed. Resume to build and obtain new approvals from all required reviewers.");
       }
     } catch (error) {
       await this.block(`Candidate cannot be verified: ${error.message}`);
@@ -378,11 +379,12 @@ export class SwarmController {
     return this.locked(async () => {
       requireThat(this.run, "No swarm run exists in this checkout.");
       const role = await this.authorize(sessionID, name === "candidate" ? ["builder"]
-        : name === "report" ? reviewers : ["triage", "report_html"].includes(name) ? ["orchestrator"]
-        : ["orchestrator", "builder", ...reviewers], name === "status");
+        : name === "report" ? requiredReviewers(this.run) : ["triage", "report_html"].includes(name) ? ["orchestrator"]
+        : ["orchestrator", "builder", ...requiredReviewers(this.run)], name === "status");
       await this.checkCandidate();
       if (["candidate", "report"].includes(name)) {
-        requireThat(admitted === this.job(role)?.id, "Stale dispatch: this call belongs to a previous turn.");
+        requireThat(admitted && admitted === this.job(role)?.id,
+          "Stale dispatch: this call belongs to a previous or undispatched turn.");
       }
       if (name === "report_html") {
         requireThat(["REPORTING", "APPROVED"].includes(this.run.phase),
@@ -391,6 +393,10 @@ export class SwarmController {
         requireThat(this.run.phase === "TRIAGING", "The run is not accepting triage.");
       }
       const job = this.job(role);
+      if (name === "report") {
+        requireThat(job.round === undefined || job.round === this.run.round,
+          "This reviewer has not been dispatched for the current round.");
+      }
       if (name !== "status" && job && !job.finished && !job.cancelled &&
         this.now() >= job.deadline) {
         await this.block(`${role} submitted after its deadline.`);
@@ -414,6 +420,13 @@ export class SwarmController {
           at: this.now(), candidate: next.candidate, reports: next.reports,
         });
         candidate(next, input, await this.fingerprint(this.directory));
+        if (requiredReviewers(next).includes(uiReviewer) && !next.sessions[uiReviewer]) {
+          await this.ctx.agent.get({ agentID: uiReviewer });
+          await this.ctx.permission.assert({
+            sessionID: this.run.root, agent: "orchestrator", action: "subagent", resources: [uiReviewer],
+          });
+          next.sessions[uiReviewer] = id("ses");
+        }
         this.run = next;
         this.job("builder").done = true;
         this.run.history.push({ at: this.now(), phase: "HANDOFF", candidate: next.candidate.id });
@@ -424,7 +437,7 @@ export class SwarmController {
         this.job(role).done = true;
         if (input.verdict === "blocked") {
           await this.block(`${role} blocked the candidate: ${input.summary}`);
-        } else if (reviewers.every(reviewer => this.run.reports[reviewer])) {
+        } else if (requiredReviewers(this.run).every(reviewer => this.run.reports[reviewer])) {
           // Do not reuse any child session until its submitted turn ends.
           // A fast dismissal round could otherwise overtake a prior reviewer.
           this.run.phase = "REVIEW_HANDOFF";
@@ -548,7 +561,15 @@ export class SwarmController {
         // flush() still dispatches the persisted reviewer jobs concurrently.
         for (const reviewer of reviewers) await this.enqueue(reviewer);
       }
-      if (this.run.phase === "REVIEW_HANDOFF" && reviewers.every(role => this.job(role).finished)) {
+      // Playwright MCP can share a browser across sessions. Dispatch the UI
+      // reviewer only after the baseline reviewers (including testing) finish.
+      if (this.run.phase === "REVIEWING" && requiredReviewers(this.run).includes(uiReviewer) &&
+        reviewers.every(role => this.job(role)?.finished) &&
+        this.job(uiReviewer)?.round !== this.run.round) {
+        await this.enqueue(uiReviewer);
+      }
+      if (this.run.phase === "REVIEW_HANDOFF" &&
+        requiredReviewers(this.run).every(role => this.job(role)?.finished)) {
         if (this.approvedReviews()) {
           await this.checkCandidate();
           if (this.run.phase === "REVIEW_HANDOFF") {

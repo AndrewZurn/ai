@@ -26,6 +26,9 @@
       "test-engineer": {
         "model": "opencode-go/glm-5.3"
       },
+      "ui-design-reviewer": {
+        "model": "opencode-go/glm-5.3"
+      },
       "specification-reviewer": {
         "model": "opencode-go/glm-5.3"
       },

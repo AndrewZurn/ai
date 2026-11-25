@@ -1,6 +1,7 @@
 import { SwarmController } from "./controller.js"
-import { inputs } from "./protocol.js"
+import { inputs, requiredReviewers } from "./protocol.js"
 import { repository } from "./snapshot.js"
+import { orchestratorInstructions } from "./instructions.js"
 
 function readOnlyGit(command) {
   if (!/^[A-Za-z0-9_./:@^~+= -]+$/.test(command)) return false
@@ -24,7 +25,7 @@ function readOnlyGit(command) {
 
 function view(run) {
   const { jobs, sessions, files, skills, permissions, context, ...status } = run
-  return JSON.stringify(status, null, 2)
+  return JSON.stringify({ ...status, requiredReviewers: requiredReviewers(run) }, null, 2)
 }
 
 export async function setup(ctx, dependencies = {}) {
@@ -61,7 +62,7 @@ export async function setup(ctx, dependencies = {}) {
         editor.add({
           name: `swarm_${name}`,
           description: {
-            start: "Start the mandatory builder and three-reviewer workflow in an orchestrator session.",
+            start: "Start the builder and required reviewers, including UI design review when UI changes.",
             status: "Read authoritative swarm state and recheck candidate contents.",
             triage: "Orchestrator only: classify every open finding as fix or propose dismissal, with reasons.",
             candidate: "Builder only: submit a candidate and a response to every open finding, then stop.",
@@ -81,11 +82,15 @@ export async function setup(ctx, dependencies = {}) {
     await ctx.command.transform(editor => {
       editor.add({
         name: "swarm",
-        description: "Build a task and require approval from all three reviewers",
+        description: "Build a task and require all baseline reviewers plus UI design review for UI changes",
         execute: async ({ sessionID, prompt }) => {
           if (!prompt.text.trim()) throw new Error("Usage: /swarm <task and acceptance criteria>")
           await ctx.session.switchAgent({ sessionID, agent: "orchestrator" })
           await gate.start(sessionID, prompt.text, prompt)
+          await ctx.session.synthetic({
+            sessionID,
+            text: "Swarm task enrolled. For this run, the plugin manages implementation and required reviews, then saves the HTML summary in <repository-root>/.swarms/ and attempts to open it in the browser. While the run is active, /swarm-status checks progress without changing requirements; ordinary messages pause the workflow as requirement changes. /swarm-resume continues after clarification; /swarm-cancel stops the run.",
+          })
         },
       })
       for (const command of ["status", "resume", "cancel"]) {
@@ -110,7 +115,7 @@ export async function setup(ctx, dependencies = {}) {
       if (event.agent === "orchestrator") {
         event.system.push({
           type: "text",
-          text: "Coordinate through swarm_start, swarm_status, swarm_triage, and swarm_report_html. The plugin launches the builder and reviewers. During TRIAGING, classify every finding with a reason; only its owner can accept dismissal. During REPORTING, read the authoritative ledger and call swarm_report_html with reportRequest.id, candidate.id, a title, accurate summary, and limitations. The plugin writes repository-root/.swarms and opens the HTML in the browser. Do not edit or open files yourself. An idle turn or three review verdicts alone are not task completion: wait for APPROVED with htmlReport.path, link that file, and mention any browser error. Otherwise report waiting, triage, reporting, or blocked. New task input blocks the run; use /swarm-resume after clarification.",
+          text: orchestratorInstructions,
         })
       }
       if (!state.role) return
@@ -133,7 +138,7 @@ export async function setup(ctx, dependencies = {}) {
       if (["edit", "shell"].includes(event.action)) {
         const build = state.role === "builder" && state.phase === "BUILDING" && !state.submitted
         const test = state.role === "test-engineer" && state.phase === "REVIEWING" && !state.submitted
-        const readOnlyReview = ["adversarial-reviewer", "specification-reviewer"].includes(state.role) &&
+        const readOnlyReview = ["adversarial-reviewer", "specification-reviewer", "ui-design-reviewer"].includes(state.role) &&
           state.phase === "REVIEWING" && !state.submitted && event.action === "shell" &&
           event.resources.length > 0 && event.resources.every(readOnlyGit)
         if (!(build || readOnlyReview || (test && event.action === "shell"))) {

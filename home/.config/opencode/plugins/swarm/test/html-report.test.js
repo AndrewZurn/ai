@@ -9,7 +9,7 @@ import { recoverReportTemps, renderReport, writeReport } from "../lib/html-repor
 import { browserCommand } from "../lib/browser.js";
 import { reportFilename } from "../lib/artifact-paths.js";
 import { snapshot, trackedFiles } from "../lib/snapshot.js";
-import { reviewers } from "../lib/protocol.js";
+import { reviewers, uiReviewer } from "../lib/protocol.js";
 import { SwarmController } from "../lib/controller.js";
 
 function data(directory = "/repo") {
@@ -72,7 +72,7 @@ test("HTML summarizes authoritative verdicts, findings, triage, fixes, evidence,
   const html = renderReport(run, narrative);
   for (const text of [
     "<!doctype html>", 'lang="en"', "<title>Task review summary</title>",
-    "All three reviewers approved", "Repair the guard", "Required behavior",
+    "All 3 required reviewers approved", "Repair the guard", "Required behavior",
     "Guard implemented", "Verified the original reproduction", "12 passed",
     "Original reproduction fails", "Finite testing only", "Handle empty inputs",
     run.id, run.candidate.id,
@@ -112,6 +112,31 @@ test("HTML refuses missing, mismatched or incomplete approvals", () => {
     mutate(run);
     assert.throws(() => renderReport(run, narrative), /matching approvals/);
   }
+});
+
+test("UI reports require and display the fourth approval and UI scope evidence", () => {
+  const { run, narrative } = data();
+  run.candidate.ui = { changes: "web", evidence: "Changed /settings; desktop and mobile checked" };
+  assert.throws(() => renderReport(run, narrative), /matching approvals/);
+  run.reports[uiReviewer] = {
+    candidate: run.candidate.id, verdict: "approve", summary: "UI design verified",
+    evidence: "Playwright MCP: /settings, 375px and 1440px, keyboard flow passed",
+  };
+  const html = renderReport(run, narrative);
+  assert.match(html, /All 4 required reviewers approved/);
+  assert.match(html, /UI design verified/);
+  assert.match(html, /Playwright MCP: \/settings/);
+  assert.match(html, /Changed \/settings; desktop and mobile checked/);
+  for (const update of [{ candidate: "stale" }, { verdict: "blocked" }]) {
+    const invalid = structuredClone(run);
+    Object.assign(invalid.reports[uiReviewer], update);
+    assert.throws(() => renderReport(invalid, narrative), /matching approvals/);
+  }
+  run.uiReviewRequired = true;
+  run.candidate.ui.changes = "none";
+  delete run.reports[uiReviewer];
+  assert.throws(() => renderReport(run, narrative), /matching approvals/,
+    "later rounds cannot remove UI approval requirements");
 });
 
 test("writes a private self-contained report at repository-root/.swarms with safe idempotent publication", async t => {

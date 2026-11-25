@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isTemporaryReportArtifact, reportFilename } from "./artifact-paths.js";
-import { reviewers, requireThat } from "./protocol.js";
+import { reviewers, requiredReviewers, requireThat, uiReviewer } from "./protocol.js";
 
 const escape = value => String(value ?? "").replace(/[&<>"']/g, character => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -15,10 +15,11 @@ const fields = entries => `<dl>${entries.map(([label, value]) =>
 const details = (title, content) => `<details><summary>${escape(title)}</summary>${content}</details>`;
 
 export function renderReport(run, narrative) {
-  requireThat(run.candidate && reviewers.every(role =>
+  const required = requiredReviewers(run);
+  requireThat(run.candidate && required.every(role =>
     run.reports[role]?.verdict === "approve" && run.reports[role].candidate === run.candidate.id) &&
     !run.findings.some(finding => finding.status === "open"),
-  "HTML completion reports require three matching approvals and no open findings.");
+  "HTML completion reports require all required matching approvals and no open findings.");
   const triages = run.history.filter(entry => entry.phase === "TRIAGED");
   const cards = [
     ["Review rounds", run.round],
@@ -26,7 +27,7 @@ export function renderReport(run, narrative) {
     ["Resolved", run.findings.filter(finding => finding.status === "resolved").length],
     ["Dismissed", run.findings.filter(finding => finding.status === "dismissed").length],
   ].map(([label, value]) => `<div class="card"><strong>${escape(value)}</strong><span>${escape(label)}</span></div>`).join("");
-  const verdicts = reviewers.map(role => {
+  const verdicts = required.map(role => {
     const report = run.reports[role];
     return `<article><h3>${escape(role)} — ${escape(report.verdict)}</h3>
       ${pre(report.summary)}${details("Verification evidence", pre(report.evidence))}</article>`;
@@ -57,7 +58,7 @@ export function renderReport(run, narrative) {
     typeof entry.candidate === "object" && Object.keys(entry.reports).length)
     .map(entry => details(entry.candidate.id,
       pre(entry.candidate.summary) + details("Builder evidence", pre(entry.candidate.evidence)) +
-      reviewers.filter(role => entry.reports[role]).map(role => `<h4>${escape(role)} —
+      [...reviewers, uiReviewer].filter(role => entry.reports[role]).map(role => `<h4>${escape(role)} —
         ${escape(entry.reports[role].verdict)}</h4>${pre(entry.reports[role].summary)}
         ${details("Review evidence", pre(entry.reports[role].evidence))}`).join(""),
     )).join("");
@@ -84,19 +85,20 @@ details{padding:.8rem;border:1px solid #344257;border-radius:.4rem;margin:.6rem 
 </style>
 </head>
 <body>
-<header><p class="badge">All three reviewers approved this candidate</p>
+<header><p class="badge">All ${required.length} required reviewers approved this candidate</p>
 <h1>${escape(narrative.title)}</h1>${pre(narrative.summary)}
 <div class="cards">${cards}</div></header>
 <main>
 ${section("Run and candidate", fields([
     ["Run", run.id], ["Repository", run.directory], ["Orchestrator", run.root],
     ["Candidate", run.candidate.id],
+    ["UI changes", run.candidate.ui?.changes ?? "Not recorded (legacy run)"],
     ["Generated", new Date(run.reportRequest.created).toISOString()],
   ]))}
 ${section("Final review verdicts", verdicts)}
 ${section("Orchestrator triage", triageHistory)}
 ${section("Findings, fixes, and owner verification", findings)}
-${section("Final implementation and test evidence", pre(run.candidate.summary) + pre(run.candidate.evidence))}
+${section("Final implementation and test evidence", pre(run.candidate.summary) + pre(run.candidate.evidence) + pre(run.candidate.ui?.evidence))}
 ${section("Earlier review rounds", rounds || "<p>This candidate passed on its first review round.</p>")}
 ${section("Task and requirements", details("Original task", pre(run.requirements)))}
 ${section("Limitations", pre(narrative.limitations) + "<p>This is a point-in-time record for the candidate above, not a live approval indicator. Later code or requirement changes can invalidate workflow approval. Review and finite testing do not prove the absence of defects. Evidence is reported by the named agents, not independently certified by this renderer.</p>")}

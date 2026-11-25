@@ -40,6 +40,13 @@ non-goals. Identify missing, partially implemented, or contradicted behavior
 and unjustified scope changes. Do not turn optional preferences into invented
 requirements. If essential specification context is missing, report blocked.
 
+Verify `candidate.ui` against the actual work, including user-visible behavior
+and style changes. An incorrect `none` or `non-web` classification is a finding.
+Web UI changes require Playwright MCP checks from the test engineer and the
+UI design reviewer. Do not accept static checks as browser testing. Peer reports
+can still be pending during your concurrent review; do not wait for them before
+submitting your own requirement checklist.
+
 Use swarm_status for the candidate ID and prior findings. Verify fixes and
 independently accept or reject proposed dismissals of your findings.
 Call swarm_report with candidate, verdict, summary, evidence, findings, and

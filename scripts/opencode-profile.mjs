@@ -65,7 +65,7 @@ function render(name) {
   };
   validateModel(config.model, "model");
   for (const name of ["build", "plan", "orchestrator", "builder",
-    "adversarial-reviewer", "test-engineer", "specification-reviewer"]) {
+    "adversarial-reviewer", "test-engineer", "specification-reviewer", "ui-design-reviewer"]) {
     assert(object(config.agents?.[name]) && config.agents[name].model,
       `Missing model for agents.${name}`);
   }

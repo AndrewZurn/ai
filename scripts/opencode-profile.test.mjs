@@ -100,7 +100,7 @@ test("work setup merges config and appends a closed provider allowlist", t => {
   assert.match(config.agents.build.model, /^openai\//);
   const source = JSON.parse(fs.readFileSync(f.profileFile("work"), "utf8")).config;
   for (const agent of ["build", "plan", "orchestrator", "builder",
-    "adversarial-reviewer", "test-engineer", "specification-reviewer"]) {
+    "adversarial-reviewer", "test-engineer", "specification-reviewer", "ui-design-reviewer"]) {
     assert.equal(config.agents[agent].model, source.agents[agent].model);
   }
   assert.deepEqual(config.watcher.ignore, ["work"]);
@@ -127,7 +127,7 @@ test("personal defaults use Go with local providers, without work settings", t =
   assert.equal(config.agents.build.model, "opencode-go/glm-5.3-flash");
   assert.match(config.agents["adversarial-reviewer"].model, /^opencode-go\//);
   assert.equal(config.agents.builder.model, config.agents.build.model);
-  for (const agent of ["orchestrator", "test-engineer", "specification-reviewer"]) {
+  for (const agent of ["orchestrator", "test-engineer", "specification-reviewer", "ui-design-reviewer"]) {
     assert.match(config.agents[agent].model, /^opencode-go\//);
   }
   assert(config.providers.mlx);
@@ -320,12 +320,27 @@ test("shared reviewer definition does not fix a provider or change its permissio
 });
 
 test("swarm agents are model-neutral and every profile requires their models", t => {
-  for (const name of ["orchestrator", "builder", "test-engineer", "specification-reviewer"]) {
+  for (const name of ["orchestrator", "builder", "test-engineer", "specification-reviewer", "ui-design-reviewer"]) {
     const agent = fs.readFileSync(path.join(repoRoot,
       `home/.config/opencode/agents/${name}.md`), "utf8");
     assert.doesNotMatch(agent.split("---")[1], /^model:/m);
     const f = fixture(t);
     f.edit(f.profileFile("work"), profile => { delete profile.config.agents[name]; });
     assert.match(f.run(["--setup", "work"]).stderr, new RegExp(`Missing model for agents.${name}`));
+  }
+});
+
+test("UI reviewers require independent Playwright MCP evidence without granting write or install access", () => {
+  for (const name of ["test-engineer", "ui-design-reviewer"]) {
+    const agent = fs.readFileSync(path.join(repoRoot,
+      `home/.config/opencode/agents/${name}.md`), "utf8");
+    assert.match(agent, /Playwright MCP/);
+    assert.match(agent, /non-web UI/i);
+    assert.match(agent, /blocked/);
+    assert.match(agent, /action: edit\s+resource: "\*"\s+effect: deny/);
+    assert.match(agent, /action: subagent\s+resource: "\*"\s+effect: deny/);
+    assert.match(agent, name === "test-engineer"
+      ? /action: shell\s+resource: "\*"\s+effect: ask/
+      : /action: shell\s+resource: "\*"\s+effect: deny/);
   }
 });

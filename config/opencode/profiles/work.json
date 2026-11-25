@@ -25,6 +25,9 @@
       "test-engineer": {
         "model": "openai/gpt-6.1-sol#high"
       },
+      "ui-design-reviewer": {
+        "model": "openai/gpt-6.1-sol#high"
+      },
       "specification-reviewer": {
         "model": "openai/gpt-6.1-sol#high"
       },

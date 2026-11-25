@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setup } from "../lib/plugin.js";
-import { reviewers } from "../lib/protocol.js";
+import { reviewers, uiReviewer } from "../lib/protocol.js";
+import { orchestratorInstructions } from "../lib/instructions.js";
 
 test("plugin package, entrypoint, and directory use the swarm identity", async () => {
   const manifest = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -16,7 +17,34 @@ test("plugin package, entrypoint, and directory use the swarm identity", async (
   await assert.rejects(fs.access(new URL("../../review-gate", import.meta.url)), { code: "ENOENT" });
 });
 
-test("registers V2 commands, tools, hooks, Build derivation, and a complete scripted run", async t => {
+test("standard instructions include reusable workflow policy without seeded-evaluation rules", () => {
+  for (const requirement of [
+    /Do not launch agents manually, waive required reviews, reset budgets automatically/,
+    /submit another participant's candidate or report/,
+    /All three baseline reviewers must explicitly approve the same final candidate/,
+    /UI work also requires ui-design-reviewer/,
+    /A clean first review can pass without a repair cycle/,
+    /only the owning reviewer may verify a fix or accept\/reject dismissal/,
+    /swarm_report_html.*reportRequest\.id.*candidate\.id/,
+    /<repository-root>\/\.swarms\/.*opens it in the web browser/,
+    /Completion requires the controller's APPROVED state with htmlReport\.path/,
+    /final response must link htmlReport\.path.*candidate ID, review rounds, test evidence.*limitations/,
+    /Do not claim checks that were not run/,
+    /use \/swarm-status rather than a conversational status question/,
+    /New ordinary messages.*invalidate current approvals.*block the workflow/,
+    /\/swarm-resume after clarification/,
+    /Wait for plugin notifications rather than polling/,
+  ]) assert.match(orchestratorInstructions, requirement);
+  assert.doesNotMatch(orchestratorInstructions,
+    /unchanged seed|seeded baseline|at least one genuine|evaluation failure/i);
+});
+
+for (const uiChanges of ["none", "web"]) {
+  test(`registers V2 APIs, permissions, and a complete scripted run (${uiChanges} UI)`,
+    t => scriptedRun(t, uiChanges));
+}
+
+async function scriptedRun(t, uiChanges) {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "swarm-plugin-test-")));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   execFileSync("git", ["init", "-q"], { cwd: directory });
@@ -39,6 +67,7 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
     ["builder", { system: "placeholder", model: "profile-specific" }],
   ]);
   const prompts = [];
+  const synthetics = [];
   const openedReports = [];
   const hook = domain => async (name, callback) => { hooks.set(`${domain}:${name}`, callback); };
   let subscriber;
@@ -90,7 +119,11 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
         if (!messages.has(input.sessionID)) messages.set(input.sessionID, []);
         messages.get(input.sessionID).push({ ...input, type: "user" });
       },
-      synthetic: async () => {},
+      synthetic: async input => {
+        synthetics.push(structuredClone(input));
+        if (!messages.has(input.sessionID)) messages.set(input.sessionID, []);
+        messages.get(input.sessionID).push({ ...structuredClone(input), type: "synthetic" });
+      },
       interrupt: async () => {},
     },
   };
@@ -105,20 +138,79 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   assert.deepEqual(agents.get("builder").permissions.at(-1),
     { action: "subagent", resource: "*", effect: "deny" });
 
+  await assert.rejects(commands.get("swarm").execute({
+    sessionID: "ses_root", prompt: { text: " " },
+  }), /Usage:/);
+  assert.equal(sessions.get("ses_root").agent, "build");
+  assert.equal(synthetics.length, 0);
   await commands.get("swarm").execute({
     sessionID: "ses_root", prompt: { text: "Implement the task", files: [], skills: [] },
   });
   const active = () => [...state.entries()].find(([key]) => key.endsWith("/active"))[1];
   const invoke = async (name, input, sessionID) => JSON.parse((await tools.get(`swarm_${name}`)
     .execute(input, { sessionID })).content);
+  const finishUI = async cleanup => {
+    if (uiChanges === "none") {
+      assert.equal(active().sessions[uiReviewer], undefined);
+      return cleanup;
+    }
+    assert.equal(active().phase, "REVIEWING");
+    const sessionID = active().sessions[uiReviewer];
+    assert.equal(active().jobs.at(-1).role, uiReviewer);
+    assert(active().jobs.filter(job => reviewers.includes(job.role)).every(job => job.finished));
+    for (const [action, resources, expected] of [
+      ["edit", ["code.js"], "deny"],
+      ["shell", ["touch candidate"], "deny"],
+      ["shell", ["git diff --no-ext-diff --no-textconv -- code.js"], "allow"],
+    ]) {
+      const event = { sessionID, action, resources, effect: "allow" };
+      await hooks.get("permission:evaluate")(event);
+      assert.equal(event.effect, expected);
+    }
+    await invoke("report", {
+      candidate: active().candidate.id, verdict: "approve", summary: "UI verified",
+      evidence: "Scripted Playwright MCP review evidence", findings: [], decisions: [],
+    }, sessionID);
+    assert.equal(active().phase, "REVIEW_HANDOFF");
+    messages.get(sessionID).push({
+      type: "idle", id: `msg_ui_${active().round}`, outcome: "succeeded",
+      time: { created: Date.now() },
+    });
+    await cleanup();
+    const nextCleanup = await configure();
+    t.after(nextCleanup);
+    return nextCleanup;
+  };
   const run = active();
+  assert.equal(run.requirements, "Implement the task", "policy must not alter task requirements");
+  assert.equal(run.phase, "BUILDING", "instructions must not invalidate the new run");
+  assert.equal(synthetics.length, 1);
+  assert.equal(synthetics[0].sessionID, "ses_root");
+  assert.match(synthetics[0].text, /While the run is active, \/swarm-status/);
+  assert.match(synthetics[0].text, /ordinary messages pause the workflow/);
+  assert.match(synthetics[0].text, /\/swarm-resume.*\/swarm-cancel/);
+  assert(!synthetics[0].text.includes(orchestratorInstructions),
+    "persistent startup help must not retain the agent-only workflow policy");
+  const initialContext = { sessionID: "ses_root", agent: "orchestrator", system: [], tools: {} };
+  await hooks.get("session:context")(initialContext);
+  assert(initialContext.system.some(part => part.text === orchestratorInstructions),
+    "the command-selected orchestrator receives the full workflow instructions");
+  await assert.rejects(commands.get("swarm").execute({
+    sessionID: "ses_root", prompt: { text: "Attempt duplicate enrollment" },
+  }), /already has an active run/);
+  assert.equal(synthetics.length, 1, "failed enrollment does not emit another startup message");
+  assert.equal(active().requirements, run.requirements);
   const builder = run.sessions.builder;
   assert.equal(prompts.length, 1);
   assert.equal(sessions.get("ses_root").agent, "orchestrator");
   const denied = { sessionID: builder, action: "edit", effect: "allow" };
   await hooks.get("permission:evaluate")(denied);
   assert.equal(denied.effect, "allow");
-  await invoke("candidate", { summary: "Complete", evidence: "Checks passed", responses: [] }, builder);
+  await invoke("candidate", {
+    summary: "Complete", evidence: "Checks passed", responses: [],
+    ui: { changes: uiChanges, evidence: uiChanges === "none"
+      ? "No user interface changes" : "Changed /settings. URL: http://localhost:3000/settings" },
+  }, builder);
   await hooks.get("permission:evaluate")(denied);
   assert.equal(denied.effect, "deny");
   await assert.rejects(hooks.get("tool:execute.before")({
@@ -183,8 +275,9 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   }
   // Deterministic restart reconciliation also waits for the three final turns.
   await reloadedCleanup();
-  const finalCleanup = await configure();
+  let finalCleanup = await configure();
   t.after(finalCleanup);
+  finalCleanup = await finishUI(finalCleanup);
   assert.equal(active().phase, "TRIAGING");
   const triageJob = active().jobs.at(-1);
   assert.equal(triageJob.role, "orchestrator");
@@ -194,6 +287,8 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   const rootContext = { sessionID: "ses_root", agent: "orchestrator", system: [], tools: {} };
   await hooks.get("session:context")(rootContext);
   assert(rootContext.system.some(part => part.text.includes("swarm_triage")));
+  assert(rootContext.system.some(part => part.text === orchestratorInstructions),
+    "instructions remain present after plugin reload and state transitions");
   const findingID = active().findings[0].id;
   const decision = {
     request: active().triageRequest.id, candidate: active().candidate.id,
@@ -208,6 +303,8 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   await fs.writeFile(path.join(directory, "code.js"), "fixed candidate\n");
   await invoke("candidate", {
     summary: "Added guard", evidence: "Regression check passed",
+    ui: { changes: uiChanges, evidence: uiChanges === "none"
+      ? "No user interface changes" : "Fixed /settings. URL: http://localhost:3000/settings" },
     responses: [{ findingID, action: "fixed", reason: "Implemented and verified the guard" }],
   }, builder);
   messages.get(builder).push({
@@ -230,8 +327,9 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
     });
   }
   await verificationCleanup();
-  const approvedCleanup = await configure();
+  let approvedCleanup = await configure();
   t.after(approvedCleanup);
+  approvedCleanup = await finishUI(approvedCleanup);
   assert.equal((await invoke("status", {}, "ses_root")).phase, "REPORTING");
   assert.equal(openedReports.length, 0);
   const reportInput = {
@@ -243,6 +341,7 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   await assert.rejects(invoke("report_html", reportInput, builder), /cannot perform/);
   const result = await invoke("report_html", reportInput, "ses_root");
   assert.equal(result.phase, "APPROVED");
+  assert.deepEqual(result.requiredReviewers, uiChanges === "none" ? reviewers : [...reviewers, uiReviewer]);
   assert.equal(path.dirname(result.htmlReport.path), path.join(directory, ".swarms"));
   assert.match(await fs.readFile(result.htmlReport.path, "utf8"), /Guard implementation review/);
   assert.deepEqual(openedReports, [result.htmlReport.path]);
@@ -258,6 +357,16 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
     "restart retains artifact provenance and the candidate fingerprint");
   assert.equal(openedReports.length, 1, "restart does not open another browser tab");
   sessions.get("ses_root").agent = "build";
+  const buildContext = {
+    sessionID: "ses_root", agent: "build", system: [], tools: {},
+    messages: await ctx.session.context({ sessionID: "ses_root" }),
+  };
+  await hooks.get("session:context")(buildContext);
+  assert.equal(buildContext.system.length, 0, "ordinary Build gets no swarm instructions");
+  assert(buildContext.messages.some(message => message.type === "synthetic"),
+    "isolation check must include the retained synthetic startup message");
+  assert(!JSON.stringify(buildContext.messages).includes("Swarm workflow instructions."),
+    "ordinary Build history must not contain the full agent-only workflow policy");
   const ordinaryEdit = {
     sessionID: "ses_root", action: "edit", resources: ["code.js"], effect: "allow",
   };
@@ -282,4 +391,4 @@ test("registers V2 commands, tools, hooks, Build derivation, and a complete scri
   }
   await hooks.get("tool:execute.before")({ tool: "subagent", sessionID: "ses_root" });
   assert.equal((await invoke("status", {}, "ses_root")).phase, "CANCELLED");
-});
+}

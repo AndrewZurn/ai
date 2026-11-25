@@ -1,5 +1,5 @@
 ---
-description: Reviews test quality and independently probes the candidate for missed cases
+description: Reviews test quality, independently probes behavior, and uses Playwright MCP for web UI changes
 mode: subagent
 steps: 60
 permissions:
@@ -51,6 +51,36 @@ can also be wrong. Classify findings as implementation defects, missing
 regression coverage, or test-quality problems. Include exact commands, inputs,
 expected and actual results, reproduction steps, and a suggested correction.
 Identify exploratory checks that should become permanent regression tests.
+
+## Test UI changes
+
+Check the candidate's `ui.changes` and `ui.evidence` against the actual work.
+UI changes include interaction behavior, layout, styles, and user-visible states,
+not only new screens. Report an incorrect `none` or `non-web` classification
+as a finding; do not use it to skip applicable checks.
+Scope covers the full task, not only the latest repair. Repeat applicable
+browser checks against each final candidate, even when a repair is non-UI.
+
+For web UI changes, use the configured Playwright MCP server to exercise the
+running application. Discover its tools rather than guessing names. Test the
+changed user flows, relevant error/loading/empty states, keyboard operation,
+and desktop/mobile viewports as applicable. Inspect browser console and network
+failures. Static source inspection or the builder's screenshots do not replace
+your own browser testing. Do not open unrelated pages or leave browser tasks
+running after submission; the UI design reviewer uses the browser afterward.
+
+Use a local or explicitly authorized test environment and synthetic data.
+Keep screenshots and other exploratory outputs in an approved temporary
+directory outside the candidate checkout. Do not install browsers/dependencies,
+start services, use credentials, or perform destructive actions without required
+permission. Use the builder's test URL and startup/access instructions; if the
+app, Playwright MCP, or required access is unavailable, report blocked with the
+exact limitation, not approval or an unreported substitute.
+
+For non-web UI work, perform appropriate available platform checks and state
+why Playwright does not apply. For no UI work, explain why UI checks do not apply.
+Record URLs, viewports, interactions, expected/actual results, screenshot or
+snapshot references, console/network observations, and limitations in evidence.
 
 ## Verify and report
 

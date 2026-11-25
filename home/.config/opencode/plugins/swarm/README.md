@@ -2,12 +2,19 @@
 
 A local OpenCode V2 server plugin (`opencode-swarm`, plugin ID `swarm`).
 An `orchestrator` agent coordinates a
-`builder` child and three independent reviewers:
+`builder` child and three baseline independent reviewers:
 
 - `adversarial-reviewer`: defects, regressions, security, and unnecessary complexity.
 - `test-engineer`: test quality, useful additions/edits/deletions, and independent
-  exploratory testing with reproducible evidence.
+  exploratory testing with reproducible evidence, including Playwright MCP for
+  web UI changes.
 - `specification-reviewer`: requirement-to-implementation-and-test traceability.
+
+UI work adds `ui-design-reviewer` for rendered design, usability, accessibility,
+and responsive-layout review. It uses Playwright MCP for web applications, and
+appropriate platform checks for non-web UI. It is not dispatched for no-UI work.
+The plugin dispatches it only after the baseline reviewers finish so its browser
+work does not interfere with the test engineer's shared Playwright session.
 
 The orchestrator owns finding triage: fix or propose dismissal, with reasons.
 The builder is the only permanent source/test writer and must follow that
@@ -52,6 +59,16 @@ location-scoped controllers:
 
 The command selects `orchestrator` for that session, captures the original user
 conversation and command attachments, persists the task, and starts the builder.
+It also supplies standard orchestrator system instructions: plugin-owned
+dispatch, mandatory approvals and owner-verified triage, HTML/browser completion,
+final evidence, and safe status/resume controls. They are injected on every
+orchestrator model turn, including after plugin reloads, not stored as permanent
+chat instructions that could affect a later Build turn. The command adds only
+a short run-specific startup notice and status/resume/cancel help to chat.
+Supply only the task, acceptance criteria, and task-specific constraints; there
+is no need to repeat these workflow rules. They are not appended to the stored
+task requirements. A clean first review may pass; a mandatory repair cycle or
+unchanged-seed failure rule belongs only to an explicitly requested evaluation.
 Alternatively, select or launch `orchestrator` as a subagent and give it a task; its `swarm_start` tool
 enrolls the task. Move a delegated orchestrator to its target Git checkout before
 enrollment; its builder and reviewers inherit that location. The outer parent
@@ -91,12 +108,14 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
           cancellation → CANCELLED
 ```
 
-1. Builder calls `swarm_candidate` with summary, test evidence, and one response
-   per open finding, then stops.
+1. Builder calls `swarm_candidate` with summary, test evidence, `ui` classification
+   and evidence (below), and one response per open finding, then stops.
 2. After the builder finishes successfully, the plugin dispatches all three
    reviewers concurrently, with the original task and a shared candidate ID.
-3. Each reviewer calls `swarm_report`. A prose reply is not a report.
-4. After all reports arrive and all three reviewer turns finish, requested
+3. For UI work, after baseline reviewer turns finish, the plugin dispatches
+   `ui-design-reviewer`. Each reviewer calls `swarm_report`. A prose reply is not
+   a report. Status exposes the complete `requiredReviewers` list.
+4. After all required reports arrive and their reviewer turns finish, requested
    changes enter `TRIAGING`. The plugin supplies the full reports/findings to
    the orchestrator and pauses builder edits. Completion is correlated through
    a saved pre-dispatch idle-marker ID and a new durable idle marker, not
@@ -113,8 +132,9 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
 7. Its owning reviewer independently records `resolved`, `dismissed`, or
    `rejected`. A rejected proposal returns to the orchestrator for fresh triage.
    Neither orchestrator nor builder can close findings or override that reviewer.
-8. Only three explicit `approve` verdicts for the current candidate, with no
-   open findings, transition to `REPORTING`.
+8. Only explicit `approve` verdicts from every required reviewer for the current
+   candidate, with no open findings, transition to `REPORTING`: three for no-UI
+   work, four for UI work.
 9. The orchestrator reads the final ledger and calls `swarm_report_html` with
    `request` (`reportRequest.id`), `candidate` (`candidate.id`), `title`,
    `summary`, and `limitations`. The plugin adds authoritative evidence and
@@ -122,8 +142,53 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
    It then automatically attempts to open the file in the browser.
 
 Every candidate creates a new round and clears prior approvals, even when the
-orchestrator only proposes dismissals. Review sessions are reused. All three must
-approve again after any permanent test or implementation change.
+orchestrator only proposes dismissals. Review sessions are reused. All required
+reviewers must approve again after any permanent test or implementation change.
+Once UI work is declared, its reviewer remains required for subsequent repair
+rounds. Scope downgrades are rejected: `web` must remain `web`, and `non-web`
+cannot become `none` (but can upgrade to `web`). This keeps the test engineer's
+applicable UI checks required against each candidate, not just the design
+reviewer's approval. Scope covers the full task, even for a non-UI repair.
+
+### UI scope and browser evidence
+
+Every `swarm_candidate` includes:
+
+```json
+{
+  "ui": {
+    "changes": "web",
+    "evidence": "Changed /settings form states. Local URL: http://localhost:3000/settings. Startup: use the existing dev script with approval. Use synthetic settings data; no sign-in required."
+  }
+}
+```
+
+`changes` is `none`, `web`, or `non-web`. Evidence is required even for `none`.
+Classify actual UI work across the task, including interaction, style, layout,
+and user-visible state changes, not file extensions. For web work include a test
+URL, startup instructions, and safe test data/access requirements. The test
+engineer and specification reviewer independently check the classification.
+This is an evidence-based declaration, not automatic source-code UI detection;
+an incorrect classification must be reported and corrected through review.
+The UI agent is checked for availability and dispatch permission only when
+first required, so non-UI runs do not depend on it.
+
+For web UI, both browser reviewers must use Playwright MCP themselves against
+the running test application. The test engineer checks behavior and failure
+paths; the UI design reviewer checks rendered design and usability. Evidence
+identifies URLs, viewports, states, interactions, expected/actual results,
+screenshots or page snapshots, and limitations. Test engineers also inspect
+console/network failures. Source checks and builder screenshots do not replace
+independent browser checks. Required unavailable tools/app/access mean blocked,
+not approval. Non-web UI uses platform-appropriate evidence and states why
+Playwright does not apply.
+
+Use local or explicitly authorized test environments and synthetic data. Keep
+screenshots/outputs in approved temporary directories outside the candidate.
+Browser/dependency installation, service startup, credentials, and destructive
+actions still need required permission. The plugin does not auto-install tools,
+start an app, or certify that prose evidence proves browser execution. Existing
+Playwright MCP configuration and user restrictions remain unchanged.
 
 `swarm_report` includes:
 
@@ -258,7 +323,7 @@ metered by this plugin; the round/deadline limits bound workflow turns, not cost
   or write files. Review commands before granting access. Candidate changes
   caused by tests also invalidate the review.
 - The plugin preserves user session permission rules for children. It separately
-  enforces the adversarial/specification reviewers' read-only Git shell allowlist,
+  enforces the adversarial/specification/UI-design reviewers' read-only Git shell allowlist,
   even if a parent session allowed arbitrary shell commands. Managed diffs must
   use `git diff --no-ext-diff --no-textconv`; output redirection, write flags,
   and other commands are denied. Agent/global policies still apply.
@@ -289,7 +354,9 @@ node --test home/.config/opencode/plugins/swarm/test/*.test.js
 node --test scripts/opencode-profile.test.mjs
 ```
 
-Tests cover dispatch ordering, three-reviewer approval, ownership and dismissal
+Tests cover dispatch ordering, three/four-reviewer approval, UI-scope validation,
+conditional UI dispatch, browser-review ordering, UI finding ownership across
+repair rounds, missing/denied UI reviewers, blocked UI checks, ownership and dismissal
 negotiation, stale/forged/malformed reports, candidate changes, restart recovery,
 retry-safe outbox delivery, blocked/missing reports, deadlines, cancellation,
 permission failures, API registration, and real Git fingerprints.
@@ -297,9 +364,12 @@ HTML tests cover escaped content, private/atomic publication, output ownership,
 fingerprint preservation, approval/role guards, retries, failures, and mocked
 browser launches. Tests do not open browsers or create reports for users.
 
-For a live smoke test, use a disposable Git checkout and a tiny task. Confirm
-that three reviewer children appear only after builder handoff, an exploratory
-test requires approval, and all three approvals lead to `REPORTING`. Confirm
+For a live smoke test, use a disposable Git checkout and a tiny no-UI task. Confirm
+that three reviewer children appear only after builder handoff, no UI reviewer
+appears, an exploratory test requires approval, and three approvals lead to
+`REPORTING`. Repeat with web UI work in a disposable running test application:
+confirm independent Playwright checks by the test engineer and the later
+UI design reviewer, and that all four approvals are required. Confirm
 the orchestrator generates the HTML in `.swarms`, the browser opens, and status
 then becomes `APPROVED` with `htmlReport.path`. Add a non-ignored source file and
 confirm status becomes `BLOCKED`. Do not use
