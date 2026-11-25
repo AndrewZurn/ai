@@ -18,10 +18,17 @@ export async function readPlan(directory, reference, authorize) {
   try {
     const stat = await handle.stat();
     requireThat(stat.isFile() && stat.size <= 1024 * 1024, "Plan must be a text file no larger than 1 MiB.");
-    const content = await handle.readFile("utf8");
-    requireThat(Buffer.byteLength(content) <= 1024 * 1024 && content.trim() && !content.includes("\0"),
+    const bytes = await handle.readFile();
+    requireThat(bytes.length <= 1024 * 1024, "Plan must be no larger than 1 MiB.");
+    let content;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error("Plan must contain valid UTF-8 text.");
+    }
+    requireThat(content.trim() && !content.includes("\0"),
       "Plan must contain nonempty text no larger than 1 MiB.");
-    return { reference: source, path: file, content, sha256: createHash("sha256").update(content).digest("hex") };
+    return { reference: source, path: file, content, sha256: createHash("sha256").update(bytes).digest("hex") };
   } finally {
     await handle.close();
   }

@@ -144,6 +144,21 @@ async function scriptedRun(t, uiChanges) {
   }), /Usage:/);
   assert.equal(sessions.get("ses_root").agent, "build");
   assert.equal(synthetics.length, 0);
+  await assert.rejects(commands.get("swarm").execute({
+    sessionID: "ses_root", prompt: { text: "--plan missing.md" },
+  }), { code: "ENOENT" });
+  assert.equal(sessions.get("ses_root").agent, "build", "a missing plan must restore the previous agent");
+  assert.equal(state.size, 0);
+  assert.equal(prompts.length, 0);
+  const authorize = ctx.permission.assert;
+  ctx.permission.assert = async () => { throw new Error("read denied"); };
+  await assert.rejects(commands.get("swarm").execute({
+    sessionID: "ses_root", prompt: { text: "--plan PLAN.md" },
+  }), /read denied/);
+  ctx.permission.assert = authorize;
+  assert.equal(sessions.get("ses_root").agent, "build", "read denial must restore the previous agent");
+  assert.equal(state.size, 0);
+  assert.equal(synthetics.length, 0);
   await commands.get("swarm").execute({
     sessionID: "ses_root", prompt: { text: "--plan PLAN.md Implement the task", files: [], skills: [] },
   });

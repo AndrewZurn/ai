@@ -87,8 +87,22 @@ export async function setup(ctx, dependencies = {}) {
         description: "Build a task and require all baseline reviewers plus UI design review for UI changes",
         execute: async ({ sessionID, prompt }) => {
           const input = planCommand(prompt.text)
-          await ctx.session.switchAgent({ sessionID, agent: "orchestrator" })
-          await gate.start(sessionID, input.task, prompt, input.plan)
+          const previous = await ctx.session.get({ sessionID })
+          const priorRun = await ctx.storage.get(gate.key)
+          try {
+            await ctx.session.switchAgent({ sessionID, agent: "orchestrator" })
+            await gate.start(sessionID, input.task, prompt, input.plan)
+          } catch (error) {
+            // Do not strand a rejected enrollment on the read-only agent, but
+            // keep orchestration if a new run was durably created before I/O failed.
+            const current = await ctx.storage.get(gate.key)
+            const session = await ctx.session.get({ sessionID })
+            if (current?.id === priorRun?.id && session.agent === "orchestrator" &&
+              session.location.directory === previous.location.directory) {
+              await ctx.session.switchAgent({ sessionID, agent: previous.agent })
+            }
+            throw error
+          }
           await ctx.session.synthetic({
             sessionID,
             text: "Swarm plan enrolled for orchestrator review; implementation has not started. Answer any targeted clarification questions; the builder starts when the plan is clear. /swarm-status checks progress. After implementation starts, ordinary messages pause the workflow as requirement changes and /swarm-resume continues after clarification. /swarm-cancel stops the run. Successful completion saves the HTML summary in <repository-root>/.swarms/ and attempts to open it in the browser.",

@@ -40,3 +40,21 @@ test("plan loading authorizes and pins the complete file, and rejects missing/no
     await assert.rejects(readPlan(directory, file, async () => {}), /text|1 MiB/);
   }
 });
+
+test("plan integrity hashes raw bytes and rejects lossy UTF-8 decoding", async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "swarm-plan-bytes-test-")));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "external-plan.md");
+  for (const invalid of [Buffer.from([0x50, 0xff]), Buffer.from([0x50, 0xfe])]) {
+    await fs.writeFile(file, invalid);
+    await assert.rejects(readPlan(directory, file, async () => {}), /valid UTF-8/);
+  }
+  await fs.writeFile(file, "Plan");
+  const plain = await readPlan(directory, file, async () => {});
+  const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("Plan")]);
+  await fs.writeFile(file, withBom);
+  const bom = await readPlan(directory, file, async () => {});
+  assert.equal(bom.content, plain.content, "decoding can normalize a valid UTF-8 byte-order mark");
+  assert.notEqual(bom.sha256, plain.sha256, "byte changes must still invalidate the recorded plan");
+  assert.equal(bom.sha256, createHash("sha256").update(withBom).digest("hex"));
+});

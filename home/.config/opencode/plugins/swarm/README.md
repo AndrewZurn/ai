@@ -61,9 +61,12 @@ The command selects `orchestrator` for that session, captures the original user
 conversation and command attachments, persists the task and complete plan text,
 and dispatches the orchestrator for plan review. The plan path is required,
 relative to the repository root or absolute; quote paths containing spaces.
-The plan must be a readable nonempty text file no larger than 1 MiB. Plan reads
+The plan must be a readable nonempty UTF-8 text file no larger than 1 MiB.
+Plan identity hashes the original bytes, not normalized text. Plan reads
 respect the orchestrator's read permissions. Optional task details default to
 "Implement the referenced plan."
+Enrollment failures before a new run is created restore the session's previous
+agent; failures after durable enrollment keep the orchestrator for recovery.
 It also supplies standard orchestrator system instructions: plugin-owned
 dispatch, mandatory approvals and owner-verified triage, HTML/browser completion,
 final evidence, and safe status/resume controls. They are injected on every
