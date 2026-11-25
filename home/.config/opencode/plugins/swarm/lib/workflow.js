@@ -16,7 +16,10 @@ export function validateWorkflow(value) {
       fail(`invalid reviewer ID ${role}.`);
     }
     if (!object(entry) || typeof entry.required !== "boolean" ||
-      Object.keys(entry).some(key => key !== "required")) fail(`${role} only accepts required (boolean).`);
+      typeof entry.description !== "string" || !entry.description.trim() ||
+      Object.keys(entry).some(key => !["required", "description"].includes(key))) {
+      fail(`${role} needs required (boolean) and a nonempty description.`);
+    }
   }
   return structuredClone(value);
 }

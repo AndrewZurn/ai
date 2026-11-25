@@ -339,7 +339,12 @@ test("swarm agents are model-neutral and every profile requires their models", t
 test("adding a configured specialist requires a profile model without changing the validator", t => {
   const f = fixture(t);
   const workflow = path.join(f.repo, "home/.config/opencode/plugins/swarm/workflow.json");
-  f.edit(workflow, value => { value.reviewers["security-reviewer"] = { required: false }; });
+  f.edit(workflow, value => {
+    value.reviewers["security-reviewer"] = {
+      required: false,
+      description: "Review authentication and authorization changes.",
+    };
+  });
   assert.match(f.run(["--setup", "work"]).stderr, /Missing model for agents.security-reviewer/);
   f.edit(f.profileFile("work"), profile => {
     profile.config.agents["security-reviewer"] = { model: profile.config.agents["test-engineer"].model };

@@ -206,7 +206,7 @@ test("specialist selection requires the owner, a current token and complete reas
     assert.deepEqual(f.state(), before);
   }
   const prompt = [...f.deliveries.values()].at(-1).text;
-  assert.match(prompt, /Reviews ui-design-reviewer concerns/);
+  assert.match(prompt, /Review web interface usability, visual design, and interaction quality in a browser/);
   assert.match(prompt, /actual candidate changes/);
   await f.tool("select", valid);
   assert.equal(f.state().phase, "REVIEWING");
@@ -219,8 +219,13 @@ test("custom specialists are selected by description, run in parallel and retain
   const role = "security-reviewer";
   const workflow = {
     version: 1, reviewers: {
-      ...Object.fromEntries(reviewers.map(reviewer => [reviewer, { required: true }])),
-      [role]: { required: false },
+      ...Object.fromEntries(reviewers.map(reviewer => [reviewer, {
+        required: true, description: `Review ${reviewer}.`,
+      }])),
+      [role]: {
+        required: false,
+        description: "Review authentication, authorization and credential handling changes.",
+      },
     },
   };
   const f = fixture({ workflow, autoSelect: false });
@@ -270,7 +275,8 @@ test("custom specialists are selected by description, run in parallel and retain
 
 test("selection recovery freezes configuration and descriptions and does not duplicate dispatch", async () => {
   const workflow = { version: 1, reviewers: {
-    baseline: { required: true }, specialist: { required: false },
+    baseline: { required: true, description: "Review baseline concerns." },
+    specialist: { required: false, description: "Reviews specialist concerns." },
   } };
   const f = fixture({ workflow, autoSelect: false });
   await f.start();
@@ -296,7 +302,8 @@ test("selection recovery freezes configuration and descriptions and does not dup
 
 test("invalid new workflow edits do not prevent saved selection, repairs or status", async () => {
   const workflow = { version: 1, reviewers: {
-    baseline: { required: true }, specialist: { required: false },
+    baseline: { required: true, description: "Review baseline concerns." },
+    specialist: { required: false, description: "Reviews specialist concerns." },
   } };
   const f = fixture({ workflow, autoSelect: false });
   await f.start();
@@ -396,7 +403,9 @@ test("slow selection permissions cannot dispatch after a deadline or changed can
 });
 
 test("a workflow with only mandatory reviewers dispatches without a selection turn", async () => {
-  const f = fixture({ workflow: { version: 1, reviewers: { safety: { required: true } } } });
+  const f = fixture({ workflow: { version: 1, reviewers: {
+    safety: { required: true, description: "Review safety concerns." },
+  } } });
   await reviewReady(f);
   assert.equal(f.state().selectionRequest, null);
   assert.deepEqual(requiredReviewers(f.state()), ["safety"]);
@@ -424,12 +433,12 @@ test("legacy enrolled runs retain their baseline and UI membership without speci
   assert.equal(f.state().phase, "APPROVED");
 });
 
-test("empty reviewer descriptions fail before enrollment or provider dispatch", async () => {
+test("workflow descriptions allow enrollment when the agent API omits description metadata", async () => {
   const f = fixture();
-  f.ctx.agent.get = async ({ agentID }) => ({ id: agentID, description: " " });
-  await assert.rejects(f.start(), /nonempty description/);
-  assert.equal(f.state(), undefined);
-  assert.equal(f.sessions.size, 1);
+  f.ctx.agent.get = async ({ agentID }) => ({ id: agentID });
+  await f.start();
+  assert.equal(f.state().workflow.reviewers["adversarial-reviewer"].description,
+    "Find defects, regressions, security risks, and unnecessary complexity in the implementation.");
 });
 
 test("a required plan is reviewed before any builder exists and only the orchestrator may release it", async () => {
@@ -700,13 +709,13 @@ async function verifyUIRepair(changes) {
   assert.equal(f.state().phase, "APPROVED");
 }
 
-test("every configured reviewer needs an available description at enrollment", async () => {
+test("every configured reviewer must be available at enrollment", async () => {
   const f = fixture();
   const checked = [];
   f.ctx.agent.get = async ({ agentID }) => {
     checked.push(agentID);
     if (agentID === uiReviewer) throw new Error("UI reviewer unavailable");
-    return { id: agentID, description: "Review the candidate" };
+    return { id: agentID };
   };
   await assert.rejects(f.start(), /UI reviewer unavailable/);
   assert(checked.includes(uiReviewer));

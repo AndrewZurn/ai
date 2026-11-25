@@ -493,12 +493,8 @@ export class SwarmController {
         sessionID, agent: "orchestrator", action: "read", resources: [file],
       }));
       const workflow = structuredClone(this.workflow);
-      for (const [role, entry] of Object.entries(workflow.reviewers)) {
-        const agent = await this.ctx.agent.get({ agentID: role });
-        requireThat(typeof agent.description === "string" && agent.description.trim().length > 0,
-          `Reviewer ${role} needs a nonempty description for selection.`);
-        entry.description = agent.description;
-      }
+      for (const role of Object.keys(workflow.reviewers))
+        await this.ctx.agent.get({ agentID: role });
       const mandatory = Object.entries(workflow.reviewers)
         .filter(([, entry]) => entry.required).map(([role]) => role);
       // Fail before dispatch if one of the required agents is unavailable or denied.

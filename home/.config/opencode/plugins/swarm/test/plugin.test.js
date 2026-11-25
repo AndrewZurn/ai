@@ -92,7 +92,8 @@ test("deny-only dispatch preserves exact and blanket rules; invalid edits cannot
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   execFileSync("git", ["init", "-q"], { cwd: directory });
   const workflow = { version: 1, reviewers: {
-    baseline: { required: true }, specialist: { required: false },
+    baseline: { required: true, description: "Review baseline concerns." },
+    specialist: { required: false, description: "Review specialist concerns." },
   } };
   const storage = new Map();
   const hooks = new Map();
@@ -131,7 +132,8 @@ test("deny-only dispatch preserves exact and blanket rules; invalid edits cannot
     sessions: { "old-specialist": "ses_old" }, history: [],
     selectedReviewers: ["old-specialist"],
     workflow: { version: 1, reviewers: {
-      baseline: { required: true }, "old-specialist": { required: false },
+      baseline: { required: true, description: "Review baseline concerns." },
+      "old-specialist": { required: false, description: "Review old specialist concerns." },
     } },
   });
   let cleanup = await setup(ctx, { workflow });

@@ -175,7 +175,8 @@ When adding profile features, update this section and the profile tests.
 The opt-in `orchestrator` uses a local server plugin to dispatch a `builder`,
 then mandatory and description-selected specialist reviewers in parallel.
 `home/.config/opencode/plugins/swarm/workflow.json` lists reviewer IDs with a
-`required` flag. Defaults keep `adversarial-reviewer`, `test-engineer`, and
+`required` flag and a nonempty `description`. Defaults keep
+`adversarial-reviewer`, `test-engineer`, and
 `specification-reviewer` mandatory; `ui-design-reviewer` is a specialist.
 After each builder handoff, the orchestrator reads every specialist description,
 assesses the full task and actual changes, and records an invoke/skip decision
@@ -188,10 +189,11 @@ Only a finding's owner can verify its fix or accept dismissal.
 Findings first return to the orchestrator for mandatory fix/dismiss triage.
 The builder must follow those decisions; proposed dismissals still need the
 owning reviewer's agreement.
-To add a reviewer, add its agent definition, a model assignment in each profile,
-and a workflow entry. No controller-code or orchestrator-allowlist edit is needed.
+To add a reviewer, add its agent definition with a nonempty description, a model
+assignment in each profile, and a workflow entry with a nonempty `description`.
+No controller-code or orchestrator-allowlist edit is needed.
 Use `/reload` after workflow edits; active/resumed runs retain their saved
-configuration and agent descriptions.
+configuration and workflow descriptions.
 After all required reviewers approve, the orchestrator generates a self-contained HTML
 summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
 the browser and records its path in `htmlReport`.

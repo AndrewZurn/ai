@@ -138,20 +138,32 @@ into `~/.config/opencode/plugins/swarm/`; no additional home symlink is needed.
 {
   "version": 1,
   "reviewers": {
-    "adversarial-reviewer": { "required": true },
-    "test-engineer": { "required": true },
-    "specification-reviewer": { "required": true },
-    "ui-design-reviewer": { "required": false }
+    "adversarial-reviewer": {
+      "required": true,
+      "description": "Find defects, regressions, security risks, and unnecessary complexity."
+    },
+    "test-engineer": {
+      "required": true,
+      "description": "Check test coverage and independently verify behavior."
+    },
+    "specification-reviewer": {
+      "required": true,
+      "description": "Verify that the implementation and its evidence satisfy every task requirement."
+    },
+    "ui-design-reviewer": {
+      "required": false,
+      "description": "Review web interface usability, visual design, and interaction quality."
+    }
   }
 }
 ```
 
 - `required: true` always participates and cannot be skipped by the orchestrator.
-- `required: false` is a specialist: the orchestrator reads its resolved OpenCode
+- `required: false` is a specialist: the orchestrator reads its workflow
   `description` and records `invoke` or `skip`, with a task-specific reason.
   There are no path/keyword conditions or ordering dependencies in configuration.
-- All configured agents must exist and have nonempty descriptions at enrollment.
-  Descriptions are stored with the configuration in the run. They provide scope
+- All configured agents must exist and have a nonempty workflow `description`.
+  These descriptions are stored with the configuration in the run. They provide scope
   and invocation criteria, not permission to override workflow policy.
 - A selected specialist's approval becomes mandatory for every subsequent
   candidate, even after its findings close. Reassessment can add, not remove,
@@ -166,8 +178,8 @@ into `~/.config/opencode/plugins/swarm/`; no additional home symlink is needed.
 - Strict JSON is required. Unknown fields, reserved/invalid agent IDs, and
   configurations without at least one mandatory reviewer are rejected.
 
-To add a reviewer, create its shared agent definition, give it a clear description,
-add a `reviewers` entry here, and assign its model in each machine profile.
+To add a reviewer, create its shared agent definition, add a `reviewers` entry
+with a clear `description` here, and assign its model in each machine profile.
 Profile validation discovers configured reviewers; no code or explicit
 orchestrator allowlist edit is needed. Run `oc2 --setup <profile>` after profile
 edits. A deny-only hook restricts orchestrator dispatch to configured/enrolled
