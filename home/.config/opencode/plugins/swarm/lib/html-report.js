@@ -3,7 +3,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isTemporaryReportArtifact, reportFilename } from "./artifact-paths.js";
-import { reviewers, requiredReviewers, requireThat, uiReviewer } from "./protocol.js";
+import {
+  reviewers, requiredReviewers, requireThat, reviewRounds, uiReviewer, validateExecutiveSummary,
+} from "./protocol.js";
 
 const escape = value => String(value ?? "").replace(/[&<>"']/g, character => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -13,6 +15,28 @@ const section = (title, content) => `<section><h2>${escape(title)}</h2>${content
 const fields = entries => `<dl>${entries.map(([label, value]) =>
   `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`).join("")}</dl>`;
 const details = (title, content) => `<details><summary>${escape(title)}</summary>${content}</details>`;
+const paragraphs = value => String(value).split(/\n\s*\n/u)
+  .map(paragraph => `<p>${escape(paragraph)}</p>`).join("");
+const bullets = values => `<ul>${values.map(value => `<li>${escape(value)}</li>`).join("")}</ul>`;
+
+export function renderExecutiveSummary(run, narrative) {
+  validateExecutiveSummary(run, narrative);
+  const executive = narrative.executiveSummary;
+  const recorded = new Map(reviewRounds(run).map(round => [round.candidate.id, round]));
+  return section("Executive summary", `<p class="reading-time">2–3 minute read · Written by the orchestrator from the recorded ledger</p>
+    <h3>Outcome and scope</h3>${paragraphs(narrative.summary)}
+    <h3>Review round story</h3>${executive.rounds.map(round => `<article>
+      <h4>Round ${escape(round.candidate.split(":")[0])}</h4>
+      ${paragraphs(round.summary)}${round.reviewers.map(reviewer => `<div class="reviewer-summary">
+        <h5>${escape(reviewer.reviewer)} — ${escape(recorded.get(round.candidate).reports[reviewer.reviewer]?.verdict ?? "No report recorded")}</h5>
+        <p>${escape(reviewer.summary)}</p>${bullets(reviewer.findings)}</div>`).join("")}</article>`).join("")}
+    <ul>${[
+      ["Key findings", executive.findings],
+      ["Verification and confidence", executive.verification],
+      ["Risks and limits", narrative.limitations],
+      ["Next action", executive.actions],
+    ].map(([label, value]) => `<li><strong>${escape(label)}:</strong> ${escape(value)}</li>`).join("")}</ul>`);
+}
 
 export function renderReport(run, narrative) {
   const required = requiredReviewers(run);
@@ -20,6 +44,7 @@ export function renderReport(run, narrative) {
     run.reports[role]?.verdict === "approve" && run.reports[role].candidate === run.candidate.id) &&
     !run.findings.some(finding => finding.status === "open"),
   "HTML completion reports require all required matching approvals and no open findings.");
+  const executiveSummary = renderExecutiveSummary(run, narrative);
   const triages = run.history.filter(entry => entry.phase === "TRIAGED");
   const cards = [
     ["Review rounds", run.round],
@@ -54,11 +79,10 @@ export function renderReport(run, narrative) {
     <ul>${entry.decisions.map(decision => `<li><strong>${escape(decision.action)}</strong> —
       ${escape(decision.findingID)}${pre(decision.reason)}</li>`).join("")}</ul>
     </article>`).join("") || "<p>No triage was needed.</p>";
-  const rounds = run.history.filter(entry => entry.candidate && entry.reports &&
-    typeof entry.candidate === "object" && Object.keys(entry.reports).length)
+  const rounds = reviewRounds(run).filter(entry => entry.candidate.id !== run.candidate.id)
     .map(entry => details(entry.candidate.id,
       pre(entry.candidate.summary) + details("Builder evidence", pre(entry.candidate.evidence)) +
-      [...reviewers, uiReviewer].filter(role => entry.reports[role]).map(role => `<h4>${escape(role)} —
+      [...reviewers, uiReviewer].filter(role => entry.reports?.[role]).map(role => `<h4>${escape(role)} —
         ${escape(entry.reports[role].verdict)}</h4>${pre(entry.reports[role].summary)}
         ${details("Review evidence", pre(entry.reports[role].evidence))}`).join(""),
     )).join("");
@@ -72,23 +96,27 @@ export function renderReport(run, narrative) {
 <style>
 :root{color-scheme:light dark;font:16px/1.6 system-ui,sans-serif}
 body{max-width:1100px;margin:0 auto;padding:2rem;background:#101723;color:#e8edf5}
-h1,h2,h3{line-height:1.25}h1{font-size:2.2rem}h2{margin-top:0}
+h1,h2,h3,h4,h5{line-height:1.25;overflow-wrap:anywhere}h1{font-size:2.2rem}h2{margin-top:0}
+h5{font-size:1rem;margin:1rem 0 .5rem}.reviewer-summary p,.reviewer-summary ul{margin:.5rem 0}
 header,section{margin:0 0 1.5rem;padding:1.5rem;border:1px solid #344257;border-radius:.75rem}
 .badge{display:inline-block;background:#174838;color:#adf4cb;padding:.3rem .7rem;border-radius:2rem}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1rem;margin-top:1.5rem}
 .card{background:#1b283b;padding:1rem;border-radius:.5rem}.card strong{display:block;font-size:1.8rem}
 .card span{color:#b6c5da}dt{font-weight:650;color:#b6c5da}dd{margin:0 0 .65rem;overflow-wrap:anywhere}
+.reading-time{color:#b6c5da}p{overflow-wrap:anywhere}
 pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:.5rem 0 1rem}
 article{padding:1rem 0;border-top:1px solid #344257}summary{cursor:pointer;font-weight:650;overflow-wrap:anywhere}
-details{padding:.8rem;border:1px solid #344257;border-radius:.4rem;margin:.6rem 0}li{margin:.5rem 0}
-@media print{body{background:white;color:black;padding:0}header,section,details{border-color:#999}dt,.card span{color:#333}.card{background:#eee}.badge{background:#eee;color:black}details{display:block}}
+details{padding:.8rem;border:1px solid #344257;border-radius:.4rem;margin:.6rem 0}li{margin:.5rem 0;overflow-wrap:anywhere}
+@media(max-width:600px){body{padding:1rem}header,section{padding:1rem}h1{font-size:1.7rem}}
+@media print{body{background:white;color:black;padding:0}header,section,details{border-color:#999}dt,.card span,.reading-time{color:#333}.card{background:#eee}.badge{background:#eee;color:black}details{display:block}}
 </style>
 </head>
 <body>
 <header><p class="badge">All ${required.length} required reviewers approved this candidate</p>
-<h1>${escape(narrative.title)}</h1>${pre(narrative.summary)}
+<h1>${escape(narrative.title)}</h1>
 <div class="cards">${cards}</div></header>
 <main>
+${executiveSummary}
 ${section("Run and candidate", fields([
     ["Run", run.id], ["Repository", run.directory], ["Orchestrator", run.root],
     ["Candidate", run.candidate.id],

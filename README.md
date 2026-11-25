@@ -184,6 +184,10 @@ owning reviewer's agreement.
 After all required reviewers approve, the orchestrator generates a self-contained HTML
 summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
 the browser and records its path in `htmlReport`.
+An orchestrator-written executive summary provides a 2–3 minute brief: outcome,
+a short story for each review round, a summary and finding bullets per reviewer,
+grouped findings, verification, risks, and next actions. Full evidence stays below;
+summary prose is capped at 600 words.
 
 After regenerating your selected profile, start from a Git checkout's canonical
 root and use `/swarm --plan docs/plan.md [task and acceptance criteria]`.

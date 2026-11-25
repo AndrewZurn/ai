@@ -9,7 +9,7 @@ import { recoverReportTemps, renderReport, writeReport } from "../lib/html-repor
 import { browserCommand } from "../lib/browser.js";
 import { reportFilename } from "../lib/artifact-paths.js";
 import { snapshot, trackedFiles } from "../lib/snapshot.js";
-import { reviewers, uiReviewer } from "../lib/protocol.js";
+import { reviewers, uiReviewer, validateExecutiveSummary } from "../lib/protocol.js";
 import { SwarmController } from "../lib/controller.js";
 
 function data(directory = "/repo") {
@@ -39,12 +39,31 @@ function data(directory = "/repo") {
       decisions: [{ findingID: "test-engineer:empty-input", action: "fix", reason: "Required behavior" }],
     }, {
       candidate: { id: "1:seed", summary: "First attempt", evidence: "Initial test evidence" },
-      reports: { "test-engineer": { verdict: "changes_requested",
-        summary: "Missing guard", evidence: "Original reproduction fails" } },
+      reports: Object.fromEntries(reviewers.map(role => [role, {
+        verdict: "changes_requested", summary: `${role}: missing guard`,
+        evidence: "Original reproduction fails",
+      }])),
     }],
   };
   const narrative = {
     title: "Task review summary", summary: "The defect was fixed and independently verified.",
+    executiveSummary: {
+      rounds: [
+        { candidate: "1:seed", summary: "The first attempt missed an input guard. Review required a repair.",
+          reviewers: reviewers.map(reviewer => ({
+            reviewer, summary: "The input guard is missing.",
+            findings: ["The empty-input crash requires repair."],
+          })) },
+        { candidate: candidate.id, summary: "The builder added the guard. All reviewers verified the repair.",
+          reviewers: reviewers.map(reviewer => ({
+            reviewer, summary: "The repair was verified.",
+            findings: ["No new findings; the empty-input regression passes."],
+          })) },
+      ],
+      findings: "One major empty-input defect was resolved; no dismissals.",
+      verification: "The test engineer independently reproduced and verified the guard.",
+      actions: "No further action within scope; approval is not deployment readiness.",
+    },
     limitations: "Finite testing only; no performance measurements.",
   };
   return { run, narrative };
@@ -83,12 +102,160 @@ test("HTML summarizes authoritative verdicts, findings, triage, fixes, evidence,
   assert.match(html, /Content-Security-Policy/);
 });
 
+test("executive summary leads the detailed ledger with orchestrator stories and real bullet lists", () => {
+  const { run, narrative } = data();
+  const html = renderReport(run, narrative);
+  const executive = html.slice(html.indexOf("<h2>Executive summary</h2>"), html.indexOf("<h2>Run and candidate</h2>"));
+  assert.match(executive, /2–3 minute read.*Written by the orchestrator/);
+  assert.match(executive, /<h3>Outcome and scope<\/h3><p>The defect/);
+  assert.match(executive, /<h4>Round 1<\/h4>\s*<p>The first attempt/);
+  assert.match(executive, /<h5>test-engineer — changes_requested<\/h5>\s*<p>The input guard/);
+  assert.match(executive, /<ul><li>The empty-input crash/);
+  assert.match(executive, /<h5>test-engineer — approve<\/h5>\s*<p>The repair was verified/);
+  assert.equal((executive.match(/class="reviewer-summary"/g) ?? []).length, 6);
+  assert.match(executive, /<h4>Round 2<\/h4>\s*<p>The builder/);
+  for (const label of ["Key findings", "Verification and confidence", "Risks and limits", "Next action"]) {
+    assert(executive.includes(label), label);
+  }
+  assert.doesNotMatch(executive, /<pre>|<details>/);
+  assert.match(html, /h1,h2,h3,h4,h5\{line-height:1\.25;overflow-wrap:anywhere\}/);
+  assert.match(html, /li\{margin:\.5rem 0;overflow-wrap:anywhere\}/);
+  assert(executive.indexOf("Round 1") < executive.indexOf("Round 2"));
+  assert(!html.slice(0, html.indexOf("<main>")).includes(narrative.summary),
+    "do not repeat the long narrative above the executive summary");
+});
+
+test("later empty or partial round snapshots cannot erase historical reviewer evidence", () => {
+  const { run, narrative } = data();
+  const original = structuredClone(run.history[1]);
+  run.history.push({ candidate: original.candidate, reports: {} });
+  run.history.push({ candidate: original.candidate, reports: {
+    "adversarial-reviewer": { verdict: "approve",
+      summary: "Additional independent inspection", evidence: "Historical source check" },
+  } });
+  const html = renderReport(run, narrative);
+  assert.match(html, /Original reproduction fails/);
+  assert.match(html, /Historical source check/);
+  assert.equal((html.match(/<summary>1:seed<\/summary>/g) ?? []).length, 1);
+});
+
+test("reviewer sections label missing reports separately from recorded verdicts and no findings", () => {
+  const { run, narrative } = data();
+  delete run.history[1].reports["test-engineer"];
+  const missing = narrative.executiveSummary.rounds[0].reviewers[1];
+  missing.summary = "No report recorded for this round.";
+  missing.findings = ["No finding or verification evidence was submitted."];
+  const html = renderReport(run, narrative);
+  const executive = html.slice(html.indexOf("<h2>Executive summary</h2>"), html.indexOf("<h2>Run and candidate</h2>"));
+  assert.match(executive, /<h5>test-engineer — No report recorded<\/h5>/);
+  assert.match(executive, /<h5>adversarial-reviewer — changes_requested<\/h5>/);
+  assert.match(executive, /<h5>test-engineer — approve<\/h5>/);
+  assert.match(executive, /No new findings; the empty-input regression passes/);
+});
+
+test("historical UI reports keep their reviewer subsection even without legacy UI classification", () => {
+  const { run, narrative } = data();
+  run.history[1].reports[uiReviewer] = {
+    verdict: "changes_requested", summary: "Focus order needs repair", evidence: "Keyboard check",
+  };
+  assert.throws(() => renderReport(run, narrative), /every required reviewer/);
+  narrative.executiveSummary.rounds[0].reviewers.push({
+    reviewer: uiReviewer, summary: "Focus order needs repair.", findings: ["Keyboard order skips the save button."],
+  });
+  const html = renderReport(run, narrative);
+  assert.match(html, /<h5>ui-design-reviewer — changes_requested<\/h5>/);
+});
+
+test("round coverage is complete, unique and chronological even with repeated history snapshots", () => {
+  for (const mutate of [
+    narrative => { delete narrative.executiveSummary; },
+    narrative => { narrative.executiveSummary.rounds = []; },
+    narrative => { narrative.executiveSummary.rounds.pop(); },
+    narrative => { narrative.executiveSummary.rounds.shift(); },
+    narrative => { narrative.executiveSummary.rounds.reverse(); },
+    narrative => { narrative.executiveSummary.rounds[0].candidate = "unknown"; },
+    narrative => { narrative.executiveSummary.rounds.push(narrative.executiveSummary.rounds[0]); },
+    narrative => { narrative.executiveSummary.rounds[1] = narrative.executiveSummary.rounds[0]; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers = []; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers.pop(); },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers.reverse(); },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers[0].reviewer = "unknown"; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers[0] = narrative.executiveSummary.rounds[0].reviewers[1]; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers[0].findings = []; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers[0].findings = [" "]; },
+    narrative => { narrative.executiveSummary.rounds[0].reviewers[0].summary = " "; },
+    narrative => { narrative.executiveSummary.rounds[0].summary = " "; },
+    narrative => { narrative.executiveSummary.actions = ""; },
+  ]) {
+    const { run, narrative } = data();
+    mutate(narrative);
+    assert.throws(() => renderReport(run, narrative), /executive|review round/i);
+  }
+  const { run, narrative } = data();
+  run.history.push(structuredClone(run.history[1]));
+  run.history.push({ candidate: run.candidate, reports: run.reports });
+  const html = renderReport(run, narrative);
+  assert.equal((html.match(/<h4>Round 1<\/h4>/g) ?? []).length, 1);
+  assert.equal((html.match(/<h4>Round 2<\/h4>/g) ?? []).length, 1);
+  assert.equal((html.match(/<summary>1:seed<\/summary>/g) ?? []).length, 1);
+});
+
+test("clean first-round approval gets one story and no invented repair", () => {
+  const { run, narrative } = data();
+  run.history = [];
+  run.round = 1;
+  run.candidate.id = "1:clean";
+  run.findings = [];
+  for (const report of Object.values(run.reports)) report.candidate = run.candidate.id;
+  narrative.executiveSummary.rounds = [{
+    candidate: run.candidate.id, summary: "The first implementation passed independent review. No repair was needed.",
+    reviewers: reviewers.map(reviewer => ({
+      reviewer, summary: "Approved without findings.", findings: ["No new findings."],
+    })),
+  }];
+  narrative.executiveSummary.findings = "No findings or dismissals.";
+  const html = renderReport(run, narrative);
+  assert.match(html, /<h4>Round 1<\/h4>/);
+  assert.doesNotMatch(html, /<h4>Round 2<\/h4>/);
+  assert.match(html, /passed on its first review round/);
+});
+
+test("executive prose has a 600-word ceiling including outcome, bullets, verification, risks and actions", () => {
+  const { run, narrative } = data();
+  const words = validateExecutiveSummary(run, narrative);
+  narrative.summary += " word".repeat(600 - words);
+  assert.equal(validateExecutiveSummary(run, narrative), 600);
+  assert.doesNotThrow(() => renderReport(run, narrative));
+  for (const extend of [
+    copy => { copy.summary += " overflow"; },
+    copy => { copy.limitations += " overflow"; },
+    copy => { copy.executiveSummary.findings += " overflow"; },
+    copy => { copy.executiveSummary.verification += " overflow"; },
+    copy => { copy.executiveSummary.actions += " overflow"; },
+    copy => { copy.executiveSummary.rounds[0].summary += " overflow"; },
+    copy => { copy.executiveSummary.rounds[0].reviewers[0].summary += " overflow"; },
+    copy => { copy.executiveSummary.rounds[0].reviewers[0].findings.push("overflow"); },
+  ]) {
+    const copy = structuredClone(narrative);
+    extend(copy);
+    assert.throws(() => renderReport(run, copy), /600 words/);
+  }
+});
+
 test("all model/reviewer text is escaped rather than executable HTML", () => {
   const { run, narrative } = data();
   const payload = '<script>alert("x")</script><img src=x onerror="evil()"> & \'quoted\'';
   narrative.title = payload;
   narrative.summary = payload;
   narrative.limitations = payload;
+  for (const round of narrative.executiveSummary.rounds) {
+    round.summary = payload;
+    for (const reviewer of round.reviewers) {
+      reviewer.summary = payload;
+      reviewer.findings = [payload];
+    }
+  }
+  for (const key of ["findings", "verification", "actions"]) narrative.executiveSummary[key] = payload;
   run.requirements = payload;
   run.findings[0].description = payload;
   run.findings[0].decisions[0].triage.reason = payload;
@@ -128,11 +295,22 @@ test("UI reports require and display the fourth approval and UI scope evidence",
     candidate: run.candidate.id, verdict: "approve", summary: "UI design verified",
     evidence: "Playwright MCP: /settings, 375px and 1440px, keyboard flow passed",
   };
+  narrative.executiveSummary.rounds[1].reviewers.push({
+    reviewer: uiReviewer, summary: "UI design verified.", findings: ["Desktop and mobile checks passed."],
+  });
   const html = renderReport(run, narrative);
   assert.match(html, /All 4 required reviewers approved/);
   assert.match(html, /UI design verified/);
   assert.match(html, /Playwright MCP: \/settings/);
   assert.match(html, /Changed \/settings; desktop and mobile checked/);
+  const executive = html.slice(html.indexOf("<h2>Executive summary</h2>"), html.indexOf("<h2>Run and candidate</h2>"));
+  assert.equal((executive.match(/class="reviewer-summary"/g) ?? []).length, 7,
+    "UI reviewer appears only in the applicable final round");
+  narrative.executiveSummary.rounds[0].reviewers.push({
+    reviewer: uiReviewer, summary: "Unexpected reviewer.", findings: ["No UI report exists for this round."],
+  });
+  assert.throws(() => renderReport(run, narrative), /every required reviewer/);
+  narrative.executiveSummary.rounds[0].reviewers.pop();
   for (const update of [{ candidate: "stale" }, { verdict: "blocked" }]) {
     const invalid = structuredClone(run);
     Object.assign(invalid.reports[uiReviewer], update);

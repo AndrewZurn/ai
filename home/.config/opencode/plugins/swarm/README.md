@@ -168,7 +168,7 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
    work, four for UI work.
 9. The orchestrator reads the final ledger and calls `swarm_report_html` with
    `request` (`reportRequest.id`), `candidate` (`candidate.id`), `title`,
-   `summary`, and `limitations`. The plugin adds authoritative evidence and
+   `summary`, `executiveSummary`, and `limitations`. The plugin adds authoritative evidence and
    writes the HTML file. Only successful publication transitions to `APPROVED`.
    It then automatically attempts to open the file in the browser.
 
@@ -264,9 +264,50 @@ The orchestrator supplies the narrative; the plugin renders the stored ledger
 as a self-contained HTML document with:
 
 - Run/candidate identity, summary, round counts, and final reviewer verdicts.
+- A visible executive summary, written by the orchestrator from the full ledger,
+  with a short story for every review round and a summary and finding bullets
+  for each reviewer, including the final round.
 - All findings, severities, owners, triage rationale, builder responses, rejected
   repairs/dismissals, and final owner verification.
 - Final and earlier-round test/review evidence, original task, and limitations.
+
+### Executive summary contract
+
+The executive summary is a 2–3 minute decision brief, not a copy of the review
+transcripts. Aim for 400–550 words; simpler tasks can be shorter. The plugin
+enforces a maximum of 600 prose words across these required tool fields:
+
+- `summary`: 2–3 sentences on the requested outcome, what changed, and approval scope.
+- `executiveSummary.rounds`: one entry per unique candidate, in chronological order,
+  with `candidate` (exact ID), `summary` (two short storytelling sentences), and
+  `reviewers`. Explain what happened and why it needed another round or passed.
+- Each round's `reviewers`: one entry per baseline reviewer, followed by the UI
+  reviewer when applicable to that round, in the order `adversarial-reviewer`,
+  `test-engineer`, `specification-reviewer`, `ui-design-reviewer`. Each entry has
+  `reviewer` (exact role), `summary` (one concise line), and `findings` (a nonempty
+  bullet array). Prefer 2–3 short bullets on that reviewer's findings, resolutions,
+  dismissals, and verification; one explicit no-new-findings bullet can suffice.
+  Missing reports are labeled separately from no new findings. Verdict labels
+  come from the recorded ledger, not the authored narrative.
+- `executiveSummary.findings`: grouped themes, resolved/dismissed totals, and
+  consequential dismissal reasons. Overlapping reviewer findings are not necessarily
+  separate implementation defects.
+- `executiveSummary.verification`: strongest actual checks and results, with
+  builder-reported evidence distinguished from independent reviewer execution.
+- `limitations`: residual risks, untested areas, and scope exclusions.
+- `executiveSummary.actions`: the user's next action/decision, or explicitly none
+  within scope. Workflow approval does not establish deployment readiness.
+
+Candidate IDs and reviewer role labels do not count toward the prose budget.
+Raw commands, file paths, and exhaustive evidence belong in the detailed ledger below. Timings/costs are
+included only when recorded. The renderer checks structure, round coverage,
+order, per-round reviewer coverage, and length; it cannot certify the truth or
+quality of agent-written prose.
+Invalid summaries are rejected before freezing a draft, so the orchestrator can
+correct them without another code-review round. The reporting tool now requires
+`executiveSummary`; existing completed HTML files are not rewritten.
+
+### Publication and recovery
 
 Reports use `.swarms/<run-id>-<report-request-id>.html` at the canonical Git root.
 Existing user files are not overwritten. Publication is atomic, files are

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   candidate, inputs, packet, report, requireThat, requiredReviewers, reviewers,
-  terminal, triage, uiReviewer, validate,
+  terminal, triage, uiReviewer, validate, validateExecutiveSummary,
 } from "./protocol.js";
 import { snapshot, trackedFiles } from "./snapshot.js";
 import { files, skills, uniqueFiles, uniqueSkills } from "./attachments.js";
@@ -257,6 +257,7 @@ export class SwarmController {
       this.run.reportRequest.requirements === this.requirementsDigest(),
     "Stale HTML report request or candidate.");
     requireThat(this.approvedReviews(), "HTML reporting requires all required matching reviewer approvals.");
+    validateExecutiveSummary(this.run, input);
     if (this.run.reportDraft) {
       requireThat(JSON.stringify(this.run.reportDraft) === JSON.stringify(input),
         "The report narrative is already recorded; retry with the same content.");

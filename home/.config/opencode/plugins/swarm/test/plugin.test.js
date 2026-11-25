@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setup } from "../lib/plugin.js";
-import { reviewers, uiReviewer } from "../lib/protocol.js";
+import { packet, reviewers, reviewRounds, roundReviewers, uiReviewer } from "../lib/protocol.js";
 import { orchestratorInstructions } from "../lib/instructions.js";
 
 test("plugin package, entrypoint, and directory use the swarm identity", async () => {
@@ -26,6 +26,12 @@ test("standard instructions include reusable workflow policy without seeded-eval
     /A clean first review can pass without a repair cycle/,
     /only the owning reviewer may verify a fix or accept\/reject dismissal/,
     /swarm_report_html.*reportRequest\.id.*candidate\.id/,
+    /orchestrator must author a decision-focused executive summary/,
+    /400–550 words \(2–3 minutes\)/,
+    /must not exceed 600 words/,
+    /cover every unique candidate in chronological order, including the final candidate/,
+    /overlapping reviewer reports are not necessarily distinct defects/,
+    /Review approval is not deployment readiness/,
     /<repository-root>\/\.swarms\/.*opens it in the web browser/,
     /Completion requires the controller's APPROVED state with htmlReport\.path/,
     /final response must link htmlReport\.path.*candidate ID, review rounds, test evidence.*limitations/,
@@ -37,6 +43,24 @@ test("standard instructions include reusable workflow policy without seeded-eval
   ]) assert.match(orchestratorInstructions, requirement);
   assert.doesNotMatch(orchestratorInstructions,
     /unchanged seed|seeded baseline|at least one genuine|evaluation failure/i);
+});
+
+test("reporting handoff asks the orchestrator for the structured summary and complete history", async () => {
+  const prompt = packet({
+    id: "run_test", phase: "REPORTING", directory: "/repo", candidate: { id: "1:candidate" },
+    reports: {}, findings: [], context: [], history: [],
+  }, "orchestrator");
+  for (const text of [
+    "executiveSummary.rounds", "exact ID", "two short storytelling sentences",
+    "nonempty array", "executiveSummary.findings", "executiveSummary.verification",
+    "limitations", "executiveSummary.actions", "full recorded history",
+    "distinguishing builder claims from independent reviewer execution",
+    "Replace general round bullets with a reviewers array",
+    "one concise line", "each reviewer's own findings", "no report recorded",
+  ]) assert(prompt.includes(text), text);
+  const agent = await fs.readFile(new URL("../../../agents/orchestrator.md", import.meta.url), "utf8");
+  assert.match(agent, /executiveSummary\.rounds/);
+  assert.match(agent, /600-word prose limit/);
 });
 
 for (const uiChanges of ["none", "web"]) {
@@ -362,6 +386,18 @@ async function scriptedRun(t, uiChanges) {
     request: active().reportRequest.id, candidate: active().candidate.id,
     title: "Guard implementation review",
     summary: "The orchestrator triaged the guard defect, the builder fixed it, and all owners approved.",
+    executiveSummary: {
+      rounds: reviewRounds(active()).map(round => ({
+        candidate: round.candidate.id, summary: "The candidate was reviewed. The ledger records the outcome.",
+        reviewers: roundReviewers(round).map(reviewer => ({
+          reviewer, summary: "The reviewer checked the candidate.",
+          findings: ["The regression and owner decisions were checked."],
+        })),
+      })),
+      findings: "One guard defect was resolved without dismissal.",
+      verification: "Scripted regression verification passed.",
+      actions: "No follow-up within fixture scope; not a deployment approval.",
+    },
     limitations: "Scripted test fixture, not a live model evaluation.",
   };
   await assert.rejects(invoke("report_html", reportInput, builder), /cannot perform/);
@@ -369,7 +405,11 @@ async function scriptedRun(t, uiChanges) {
   assert.equal(result.phase, "APPROVED");
   assert.deepEqual(result.requiredReviewers, uiChanges === "none" ? reviewers : [...reviewers, uiReviewer]);
   assert.equal(path.dirname(result.htmlReport.path), path.join(directory, ".swarms"));
-  assert.match(await fs.readFile(result.htmlReport.path, "utf8"), /Guard implementation review/);
+  const html = await fs.readFile(result.htmlReport.path, "utf8");
+  assert.match(html, /Guard implementation review/);
+  assert.match(html, /<h2>Executive summary<\/h2>/);
+  assert.match(html, /<h4>Round 1<\/h4>/);
+  assert.match(html, /<h4>Round 2<\/h4>/);
   assert.deepEqual(openedReports, [result.htmlReport.path]);
   await invoke("report_html", reportInput, "ses_root");
   assert.equal(openedReports.length, 1, "report retries must not open duplicate tabs");

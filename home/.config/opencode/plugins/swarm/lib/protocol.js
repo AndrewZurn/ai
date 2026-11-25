@@ -1,3 +1,5 @@
+import { executiveSummaryInstructions } from "./instructions.js";
+
 export const reviewers = [
   "adversarial-reviewer", "test-engineer", "specification-reviewer",
 ];
@@ -40,6 +42,18 @@ export const inputs = {
     candidate: text,
     title: text,
     summary: text,
+    executiveSummary: object({
+      rounds: list(object({
+        candidate: text,
+        summary: text,
+        reviewers: list(object({
+          reviewer: choice([...reviewers, uiReviewer]), summary: text, findings: list(text),
+        })),
+      })),
+      findings: text,
+      verification: text,
+      actions: text,
+    }),
     limitations: text,
   }),
   candidate: object({
@@ -105,6 +119,55 @@ export function validate(schema, value, at = "input") {
     if (schema.pattern) requireThat(new RegExp(schema.pattern).test(value), `${at}: invalid ID`);
     if (schema.enum) requireThat(schema.enum.includes(value), `${at}: invalid choice`);
   }
+}
+
+export function reviewRounds(run) {
+  const rounds = new Map();
+  for (const entry of [...run.history, { candidate: run.candidate, reports: run.reports }]) {
+    if (entry.candidate && typeof entry.candidate === "object") {
+      const previous = rounds.get(entry.candidate.id);
+      // Resuming after new requirements can archive the same candidate with
+      // empty/partial reports. Keep its recorded reviewer evidence.
+      rounds.set(entry.candidate.id, {
+        ...entry, reports: { ...previous?.reports, ...entry.reports },
+      });
+    }
+  }
+  return [...rounds.values()];
+}
+
+export function roundReviewers(round) {
+  return requiredReviewers({
+    candidate: round.candidate, uiReviewRequired: Boolean(round.reports?.[uiReviewer]),
+  });
+}
+
+export function validateExecutiveSummary(run, narrative) {
+  validate(inputs.report_html.properties.executiveSummary, narrative.executiveSummary,
+    "input.executiveSummary");
+  const recorded = reviewRounds(run);
+  const expected = recorded.map(entry => entry.candidate.id);
+  const rounds = narrative.executiveSummary.rounds;
+  requireThat(rounds.length === expected.length &&
+    rounds.every((round, index) => round.candidate === expected[index]),
+  "Executive summary must cover every review round exactly once in chronological order, including the final candidate.");
+  for (const [index, round] of rounds.entries()) {
+    const roles = roundReviewers(recorded[index]);
+    requireThat(round.reviewers.length === roles.length &&
+      round.reviewers.every((reviewer, position) => reviewer.reviewer === roles[position]),
+    "Each executive-summary round must cover every required reviewer exactly once in reviewer order.");
+    requireThat(round.reviewers.every(reviewer => reviewer.findings.length > 0),
+      "Each executive-summary reviewer requires finding or verification bullets.");
+  }
+  const words = [
+    narrative.summary, narrative.limitations, narrative.executiveSummary.findings,
+    narrative.executiveSummary.verification, narrative.executiveSummary.actions,
+    ...rounds.flatMap(round => [
+      round.summary, ...round.reviewers.flatMap(reviewer => [reviewer.summary, ...reviewer.findings]),
+    ]),
+  ].join(" ").match(/\S+/gu)?.length ?? 0;
+  requireThat(words <= 600, "Executive summary prose must not exceed 600 words; move detailed evidence to the ledger.");
+  return words;
 }
 
 export function candidate(run, input, fingerprint) {
@@ -197,7 +260,7 @@ export function packet(run, role) {
     role === "orchestrator" && ["PLAN_REVIEW", "CLARIFYING"].includes(run.phase)
       ? "Read the complete referenced plan and user requirements before any implementation. Assess scope, acceptance criteria, constraints, dependencies, and verification. If ambiguous, call swarm_plan with the current planReview.request, decision clarify, a summary and specific questions; then use the question tool to ask those questions and wait for real user answers. Record every pending question's answer with swarm_plan before declaring ready. Ask further targeted questions if needed; never invent answers. When clear, call swarm_plan with decision ready, a summary, no new questions and the pending answers. Only the plugin may start the builder. Keep the plan file unchanged. Ordinary clarification replies in this stage do not require /swarm-resume."
       : role === "orchestrator" && run.phase === "REPORTING"
-      ? "All required reviewers approved the candidate and no findings remain open. Produce the mandatory HTML summary by calling swarm_report_html with reportRequest.id as request, candidate.id, a clear title, an accurate narrative summary, and limitations. Base the narrative only on the authoritative ledger. The plugin adds all reviewer evidence, triage, findings, builder responses, and owner decisions, writes under repository-root/.swarms, and opens the browser. Do not write or open files yourself. Do not call the task complete until the tool returns APPROVED and htmlReport.path; mention any browser error."
+      ? `All required reviewers approved the candidate and no findings remain open. Produce the mandatory HTML summary by calling swarm_report_html with reportRequest.id as request, candidate.id, a clear title, an accurate narrative summary, executiveSummary, and limitations. ${executiveSummaryInstructions} The plugin adds all reviewer evidence, triage, findings, builder responses, and owner decisions, writes under repository-root/.swarms, and opens the browser. Do not write or open files yourself. Do not call the task complete until the tool returns APPROVED and htmlReport.path; mention any browser error.`
       : role === "orchestrator"
       ? "Triage every open finding exactly once using swarm_triage with this request ID and candidate ID, a summary, and fix/dismiss decisions with reasons. Decide validity independently against requirements and reviewer evidence. Address general review feedback in summary even if no open findings. Dismiss is a proposal only; the owning reviewer must agree. Do not edit code, submit a candidate/report, or override a reviewer."
       : role === "builder"

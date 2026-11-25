@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SwarmController } from "../lib/controller.js";
-import { requiredReviewers, reviewers, uiReviewer } from "../lib/protocol.js";
+import { requiredReviewers, reviewers, reviewRounds, roundReviewers, uiReviewer } from "../lib/protocol.js";
 
 export function fixture(options = {}) {
   const data = new Map();
@@ -137,6 +137,19 @@ export const htmlInput = f => ({
   request: f.state().reportRequest.id, candidate: f.state().candidate.id,
   title: "Completed task review",
   summary: "Implemented and independently reviewed the requested task.",
+  executiveSummary: {
+    rounds: reviewRounds(f.state()).map(round => ({
+      candidate: round.candidate.id,
+      summary: "The candidate was independently reviewed. Its outcome is recorded in the ledger.",
+      reviewers: roundReviewers(round).map(reviewer => ({
+        reviewer, summary: "Review evidence is recorded.",
+        findings: ["The reviewer's finding decisions are retained."],
+      })),
+    })),
+    findings: "See the authoritative finding counts and owner decisions.",
+    verification: "Recorded test commands and reviewer evidence support this candidate.",
+    actions: "No further action within scope; deployment readiness is not assessed.",
+  },
   limitations: "Finite testing does not prove the absence of defects.",
 });
 export const planInput = (f, overrides = {}) => ({
@@ -1119,6 +1132,7 @@ test("completion requires an orchestrator HTML report after all reviewers finish
   assert.equal(f.state().phase, "APPROVED");
   assert.equal(f.writtenReports.length, 1);
   assert.equal(f.writtenReports[0].narrative.summary, input.summary);
+  assert.deepEqual(f.writtenReports[0].narrative.executiveSummary, input.executiveSummary);
   assert.equal(f.openedReports[0], f.state().htmlReport.path);
   assert.equal(f.state().htmlReport.browser.state, "opened");
   await f.tool("report_html", input);
@@ -1127,12 +1141,37 @@ test("completion requires an orchestrator HTML report after all reviewers finish
   await assert.rejects(f.tool("report_html", { ...input, summary: "Replacement" }), /already recorded/);
 });
 
+test("invalid executive summaries can be corrected before freezing a draft or publishing", async () => {
+  const f = fixture({ autoReport: false });
+  await reportingReady(f);
+  const input = htmlInput(f);
+  for (const mutate of [
+    copy => { delete copy.executiveSummary; },
+    copy => { copy.executiveSummary.rounds = []; },
+    copy => { copy.executiveSummary.rounds[0].candidate = "stale"; },
+    copy => { copy.executiveSummary.rounds[0].reviewers = []; },
+    copy => { copy.executiveSummary.rounds[0].reviewers[0].findings = []; },
+    copy => { copy.executiveSummary.findings = "word ".repeat(601); },
+  ]) {
+    const invalid = structuredClone(input);
+    mutate(invalid);
+    await assert.rejects(f.tool("report_html", invalid), /executive|review round/i);
+    assert.equal(f.state().phase, "REPORTING");
+    assert.equal(f.state().reportDraft, null);
+    assert.equal(f.writtenReports.length, 0);
+    assert.equal(f.openedReports.length, 0);
+  }
+  await f.tool("report_html", input);
+  assert.equal(f.state().phase, "APPROVED");
+});
+
 test("reporting cannot start early and cannot survive a changed candidate", async () => {
   const f = fixture({ autoReport: false });
   await f.start();
   await assert.rejects(f.tool("report_html", {
     request: "html_not_ready", candidate: "none", title: "Premature",
     summary: "Not approved", limitations: "No reviews yet",
+    executiveSummary: { rounds: [], findings: "None", verification: "None", actions: "Wait for reviews" },
   }), /not accepting/);
   const g = fixture({ autoReport: false });
   await reportingReady(g);
@@ -1265,12 +1304,21 @@ test("missing report deadline can resume reporting without spending another code
 test("new requirements during reporting cannot reuse the previous review approvals", async () => {
   const f = fixture({ autoReport: false });
   await reportingReady(f);
+  const previous = f.state().candidate.id;
+  const reports = f.state().reports;
   await f.gate.externalPrompt("ses_root", "msg_report_clarification", { text: "Also implement validation" });
   await f.gate.control("ses_root", "resume");
   await f.approvePlan();
   assert.equal(f.state().phase, "BUILDING");
   assert.deepEqual(f.state().reports, {});
   assert.equal(f.writtenReports.length, 0);
+  await f.tool("candidate", candidateInput(), "builder");
+  const rounds = reviewRounds(f.state());
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].candidate.id, previous);
+  assert.deepEqual(rounds[0].reports, reports,
+    "cleared current approvals must not erase the earlier round's historical evidence");
+  assert.deepEqual(f.state().reports, {}, "historical verdicts are not current approvals");
 });
 
 test("an interrupted HTML tool does not publish completion or launch a browser", async () => {

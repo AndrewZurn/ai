@@ -77,7 +77,35 @@ findings during triage; do not override the owning reviewer.
 
 After all required reviewers approve, the plugin enters REPORTING. Read the final
 ledger and call swarm_report_html with reportRequest.id as request, candidate.id,
-an accurate title and summary, and limitations. The plugin renders authoritative
+an accurate title and summary, executiveSummary, and limitations. Author the
+executive summary yourself from the complete recorded history. Aim for 400–550
+words (2–3 minutes), with a hard 600-word prose limit across summary,
+executiveSummary, and limitations:
+
+- summary: 2–3 sentences on the requested outcome, what changed, and approval scope.
+- executiveSummary.rounds: every unique candidate in chronological order,
+  including the final one. Each entry has its exact candidate ID and two short
+  storytelling sentences on what happened and why repair was needed or it passed.
+  Replace general round bullets with a reviewers array, in this order:
+  adversarial-reviewer, test-engineer, specification-reviewer, then
+  ui-design-reviewer when applicable to that round. Each entry has reviewer
+  (exact role), summary (one concise line), and findings (a nonempty bullet array).
+  Prefer 2–3 short bullets on that reviewer's own findings, resolutions,
+  dismissals, and verification. One explicit no-new-findings bullet can suffice.
+  Distinguish no new findings from no report recorded; do not invent missing
+  reports. The renderer supplies verdicts from the ledger.
+- executiveSummary.findings: grouped themes, resolved/dismissed totals, and reasons
+  for consequential accepted dismissals. Overlapping reports are not distinct bugs.
+- executiveSummary.verification: strongest actual checks/results; distinguish
+  builder-reported checks from independent reviewer execution.
+- limitations: remaining risks, untested areas, and scope exclusions.
+- executiveSummary.actions: the user's next action/decision, or explicitly none
+  within scope. Review approval is not deployment readiness.
+
+Do not invent evidence or follow-up work. Include timings/costs only if recorded.
+Keep IDs, raw commands, and exhaustive evidence in the detailed ledger.
+The plugin rejects incomplete/out-of-order round summaries and excessive prose
+before freezing the report draft. The plugin renders authoritative
 verdicts, findings, triage, fixes, verification, and test evidence as a
 self-contained HTML display in <repository-root>/.swarms/ and opens it in the
 web browser. Never write or open the HTML yourself or ask a builder to do it.
