@@ -10,11 +10,11 @@ An `orchestrator` agent coordinates a
   web UI changes.
 - `specification-reviewer`: requirement-to-implementation-and-test traceability.
 
-UI work adds `ui-design-reviewer` for rendered design, usability, accessibility,
-and responsive-layout review. It uses Playwright MCP for web applications, and
-appropriate platform checks for non-web UI. It is not dispatched for no-UI work.
-The plugin dispatches it only after the baseline reviewers finish so its browser
-work does not interfere with the test engineer's shared Playwright session.
+The orchestrator reads specialist descriptions to decide which expertise the
+task and actual changes need. The default specialist, `ui-design-reviewer`,
+reviews rendered design, usability, accessibility, and responsive layouts.
+All mandatory and selected specialist reviewers run in parallel.
+Browser reviewers use separate Playwright MCP servers to avoid shared state.
 
 The orchestrator owns finding triage: fix or propose dismissal, with reasons.
 The builder is the only permanent source/test writer and must follow that
@@ -129,10 +129,59 @@ agent remains `plan`; ordinary Build sessions retain optional review behavior.
 
 ## Protocol
 
+### Configure reviewers
+
+Edit `workflow.json` next to this README. The plugin directory is already linked
+into `~/.config/opencode/plugins/swarm/`; no additional home symlink is needed.
+
+```json
+{
+  "version": 1,
+  "reviewers": {
+    "adversarial-reviewer": { "required": true },
+    "test-engineer": { "required": true },
+    "specification-reviewer": { "required": true },
+    "ui-design-reviewer": { "required": false }
+  }
+}
+```
+
+- `required: true` always participates and cannot be skipped by the orchestrator.
+- `required: false` is a specialist: the orchestrator reads its resolved OpenCode
+  `description` and records `invoke` or `skip`, with a task-specific reason.
+  There are no path/keyword conditions or ordering dependencies in configuration.
+- All configured agents must exist and have nonempty descriptions at enrollment.
+  Descriptions are stored with the configuration in the run. They provide scope
+  and invocation criteria, not permission to override workflow policy.
+- A selected specialist's approval becomes mandatory for every subsequent
+  candidate, even after its findings close. Reassessment can add, not remove,
+  specialists. Selection is model judgment; the controller validates the complete
+  decision set, identity, and approval bookkeeping, not semantic relevance.
+- Each candidate's reviewer list and selection reasons persist in status and HTML.
+  New runs use configuration loaded by the plugin; `/reload` explicitly reloads
+  external workflow edits. Active/resumed runs keep their enrolled configuration
+  and descriptions, even if new workflow edits are invalid. Invalid edits reject
+  new enrollment without disabling status, recovery, or completion of saved runs.
+  Older runs without this configuration retain legacy membership.
+- Strict JSON is required. Unknown fields, reserved/invalid agent IDs, and
+  configurations without at least one mandatory reviewer are rejected.
+
+To add a reviewer, create its shared agent definition, give it a clear description,
+add a `reviewers` entry here, and assign its model in each machine profile.
+Profile validation discovers configured reviewers; no code or explicit
+orchestrator allowlist edit is needed. Run `oc2 --setup <profile>` after profile
+edits. A deny-only hook restricts orchestrator dispatch to configured/enrolled
+IDs; the plugin never adds dispatch grants or overrides deny/ask rules, including
+blanket denials. Dispatch still requires user/session permission and allowed providers.
+The manual-subagent guard also runs outside Git repositories, where the plugin
+does not install controller tools; the global orchestrator cannot bypass it there.
+Reviewers cannot edit; new reviewers receive the read-only Git shell guard.
+The test engineer alone keeps its existing user-approved exploratory shell checks.
+
 ```text
 PLAN_REVIEW ↔ CLARIFYING
     ↓ ready
-BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
+BUILDING → HANDOFF → SELECTING → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
     ↑                                    │
     └──────────── TRIAGING ←──────────────┘
               failures → BLOCKED
@@ -141,10 +190,15 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
 
 1. Builder calls `swarm_candidate` with summary, test evidence, `ui` classification
    and evidence (below), and one response per open finding, then stops.
-2. After the builder finishes successfully, the plugin dispatches all three
-   reviewers concurrently, with the original task and a shared candidate ID.
-3. For UI work, after baseline reviewer turns finish, the plugin dispatches
-   `ui-design-reviewer`. Each reviewer calls `swarm_report`. A prose reply is not
+2. After the builder finishes successfully, `SELECTING` asks the orchestrator to
+   read every specialist description and assess the full plan, requirements, and
+   actual changes. `swarm_select` takes `selectionRequest.id` as `request`,
+   `candidate.id`, and `decisions`: exactly one `{ reviewer, action, reason }`
+   per specialist. `action` is `invoke` or `skip`; mandatory reviewers must not
+   appear. Missing, duplicate, stale, unauthorized or invalid decisions cannot
+   release reviews. If there are no specialists, selection is unnecessary.
+3. The plugin dispatches all mandatory and selected reviewers concurrently.
+   Each reviewer calls `swarm_report`. A prose reply is not
    a report. Status exposes the complete `requiredReviewers` list.
 4. After all required reports arrive and their reviewer turns finish, requested
    changes enter `TRIAGING`. The plugin supplies the full reports/findings to
@@ -164,8 +218,7 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
    `rejected`. A rejected proposal returns to the orchestrator for fresh triage.
    Neither orchestrator nor builder can close findings or override that reviewer.
 8. Only explicit `approve` verdicts from every required reviewer for the current
-   candidate, with no open findings, transition to `REPORTING`: three for no-UI
-   work, four for UI work.
+   candidate, with no open findings, transition to `REPORTING`.
 9. The orchestrator reads the final ledger and calls `swarm_report_html` with
    `request` (`reportRequest.id`), `candidate` (`candidate.id`), `title`,
    `summary`, `executiveSummary`, and `limitations`. The plugin adds authoritative evidence and
@@ -175,8 +228,8 @@ BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
 Every candidate creates a new round and clears prior approvals, even when the
 orchestrator only proposes dismissals. Review sessions are reused. All required
 reviewers must approve again after any permanent test or implementation change.
-Once UI work is declared, its reviewer remains required for subsequent repair
-rounds. Scope downgrades are rejected: `web` must remain `web`, and `non-web`
+Once a specialist is selected, it remains required for subsequent repair
+rounds. UI scope downgrades are rejected: `web` must remain `web`, and `non-web`
 cannot become `none` (but can upgrade to `web`). This keeps the test engineer's
 applicable UI checks required against each candidate, not just the design
 reviewer's approval. Scope covers the full task, even for a non-UI repair.
@@ -201,8 +254,8 @@ URL, startup instructions, and safe test data/access requirements. The test
 engineer and specification reviewer independently check the classification.
 This is an evidence-based declaration, not automatic source-code UI detection;
 an incorrect classification must be reported and corrected through review.
-The UI agent is checked for availability and dispatch permission only when
-first required, so non-UI runs do not depend on it.
+Every configured specialist's availability and description are checked at
+enrollment. Dispatch permission is checked only if selected.
 
 For web UI, both browser reviewers must use Playwright MCP themselves against
 the running test application. The test engineer checks behavior and failure
@@ -213,6 +266,15 @@ console/network failures. Source checks and builder screenshots do not replace
 independent browser checks. Required unavailable tools/app/access mean blocked,
 not approval. Non-web UI uses platform-appropriate evidence and states why
 Playwright does not apply.
+
+The test engineer uses `playwright`; UI design uses `ui-browser`, a separate
+server running `@playwright/mcp@latest --isolated`. Browser state is not shared,
+and cross-server use is denied for these roles. The original `playwright`
+persistent profile is unchanged. Regenerate the saved machine profile for the
+additional server. Setup does not run `npx`, install packages, or start browsers;
+OpenCode can start configured MCP servers afterward, which may download packages.
+Additional browser specialists need their own independent browser server before
+parallel browser work; a separate tab on an existing server is not isolation.
 
 Use local or explicitly authorized test environments and synthetic data. Keep
 screenshots/outputs in approved temporary directories outside the candidate.
@@ -281,9 +343,8 @@ enforces a maximum of 600 prose words across these required tool fields:
 - `executiveSummary.rounds`: one entry per unique candidate, in chronological order,
   with `candidate` (exact ID), `summary` (two short storytelling sentences), and
   `reviewers`. Explain what happened and why it needed another round or passed.
-- Each round's `reviewers`: one entry per baseline reviewer, followed by the UI
-  reviewer when applicable to that round, in the order `adversarial-reviewer`,
-  `test-engineer`, `specification-reviewer`, `ui-design-reviewer`. Each entry has
+- Each round's `reviewers`: one entry per reviewer in that candidate's saved
+  `reviewers` list, in its recorded configuration order. Each entry has
   `reviewer` (exact role), `summary` (one concise line), and `findings` (a nonempty
   bullet array). Prefer 2–3 short bullets on that reviewer's findings, resolutions,
   dismissals, and verification; one explicit no-new-findings bullet can suffice.
@@ -426,8 +487,10 @@ node --test home/.config/opencode/plugins/swarm/test/*.test.js
 node --test scripts/opencode-profile.test.mjs
 ```
 
-Tests cover dispatch ordering, three/four-reviewer approval, UI-scope validation,
-conditional UI dispatch, browser-review ordering, UI finding ownership across
+Tests cover workflow validation, complete description-based specialist selection,
+mandatory enforcement, parallel dispatch, custom reviewers, saved descriptions,
+three/four-reviewer approval, UI-scope validation, independent browser routing,
+UI finding ownership across
 repair rounds, missing/denied UI reviewers, blocked UI checks, ownership and dismissal
 negotiation, stale/forged/malformed reports, candidate changes, restart recovery,
 retry-safe outbox delivery, blocked/missing reports, deadlines, cancellation,
@@ -437,11 +500,13 @@ fingerprint preservation, approval/role guards, retries, failures, and mocked
 browser launches. Tests do not open browsers or create reports for users.
 
 For a live smoke test, use a disposable Git checkout and a tiny no-UI task. Confirm
-that three reviewer children appear only after builder handoff, no UI reviewer
-appears, an exploratory test requires approval, and three approvals lead to
+that the orchestrator records a specialist skip reason during SELECTING and three
+reviewer children appear together afterward, no UI reviewer appears, an
+exploratory test requires approval, and three approvals lead to
 `REPORTING`. Repeat with web UI work in a disposable running test application:
-confirm independent Playwright checks by the test engineer and the later
-UI design reviewer, and that all four approvals are required. Confirm
+confirm a specialist invoke reason and parallel independent Playwright checks by
+the test engineer (`playwright`) and UI design (`ui-browser`), and that all four
+approvals are required. Confirm
 the orchestrator generates the HTML in `.swarms`, the browser opens, and status
 then becomes `APPROVED` with `htmlReport.path`. Add a non-ignored source file and
 confirm status becomes `BLOCKED`. Do not use

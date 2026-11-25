@@ -102,6 +102,41 @@ test("HTML summarizes authoritative verdicts, findings, triage, fixes, evidence,
   assert.match(html, /Content-Security-Policy/);
 });
 
+test("custom reviewer history and escaped selection reasons appear without fixed reviewer names", () => {
+  const { run, narrative } = data();
+  const specialist = "security-reviewer";
+  run.workflow = { version: 1, reviewers: {
+    ...Object.fromEntries(reviewers.map(role => [role, { required: true, description: `Review ${role}` }])),
+    [specialist]: { required: false, description: "Review token <scope> changes." },
+  } };
+  run.selectedReviewers = [specialist];
+  run.candidate.reviewers = [...reviewers, specialist];
+  run.history[1].candidate.reviewers = [...reviewers, specialist];
+  const decision = { reviewer: specialist, action: "invoke", reason: "Token <scope> handling changed." };
+  run.history.push({
+    phase: "REVIEWERS_SELECTED", candidate: run.candidate.id, decisions: [decision],
+  });
+  run.reports[specialist] = {
+    candidate: run.candidate.id, verdict: "approve", summary: "Final security check",
+    evidence: "Current credential checks passed.",
+  };
+  run.history[1].reports[specialist] = {
+    verdict: "changes_requested", summary: "Earlier security defect", evidence: "Historical token reproduction.",
+  };
+  for (const round of narrative.executiveSummary.rounds) {
+    round.reviewers.push({ reviewer: specialist, summary: "Checked token handling.", findings: ["Verified credential boundaries."] });
+  }
+  const html = renderReport(run, narrative);
+  for (const text of ["All 4 required reviewers", "Earlier security defect",
+    "Historical token reproduction.", "Final security check", "Reviewer selection",
+    "Token &lt;scope&gt; handling changed.", "Review token &lt;scope&gt; changes."]) {
+    assert(html.includes(text), text);
+  }
+  assert(!html.includes("Token <scope>"));
+  delete run.reports[specialist];
+  assert.throws(() => renderReport(run, narrative), /matching approvals/);
+});
+
 test("executive summary leads the detailed ledger with orchestrator stories and real bullet lists", () => {
   const { run, narrative } = data();
   const html = renderReport(run, narrative);

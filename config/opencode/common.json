@@ -12,6 +12,16 @@
           "@playwright/mcp@latest"
         ],
         "disabled": false
+      },
+      "ui-browser": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@playwright/mcp@latest",
+          "--isolated"
+        ],
+        "disabled": false
       }
     }
   }

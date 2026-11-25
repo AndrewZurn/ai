@@ -4,6 +4,7 @@ import os from "node:os";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { readWorkflow } from "../home/.config/opencode/plugins/swarm/lib/workflow.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const profileRoot = path.join(repoRoot, "config/opencode");
@@ -65,7 +66,7 @@ function render(name) {
   };
   validateModel(config.model, "model");
   for (const name of ["build", "plan", "orchestrator", "builder",
-    "adversarial-reviewer", "test-engineer", "specification-reviewer", "ui-design-reviewer"]) {
+    ...Object.keys(readWorkflow().reviewers)]) {
     assert(object(config.agents?.[name]) && config.agents[name].model,
       `Missing model for agents.${name}`);
   }

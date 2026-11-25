@@ -7,6 +7,7 @@ import test from "node:test";
 import { setup } from "../lib/plugin.js";
 import { packet, reviewers, reviewRounds, roundReviewers, uiReviewer } from "../lib/protocol.js";
 import { orchestratorInstructions } from "../lib/instructions.js";
+import { SwarmController } from "../lib/controller.js";
 
 test("plugin package, entrypoint, and directory use the swarm identity", async () => {
   const manifest = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -17,12 +18,35 @@ test("plugin package, entrypoint, and directory use the swarm identity", async (
   await assert.rejects(fs.access(new URL("../../review-gate", import.meta.url)), { code: "ENOENT" });
 });
 
+test("manual orchestrator dispatch fails closed outside Git without changing ordinary sessions", async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "swarm-non-git-")));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const hooks = new Map();
+  let agent = "orchestrator";
+  const ctx = {
+    location: { directory },
+    tool: {
+      hook: async (name, callback) => hooks.set(name, callback),
+      transform: async () => { assert.fail("non-Git locations must not register controller tools"); },
+    },
+    session: { get: async () => ({ agent, location: { directory } }) },
+  };
+  assert.equal(await setup(ctx), undefined);
+  const before = hooks.get("execute.before");
+  assert(before, "manual-dispatch guard must register before repository detection");
+  await assert.rejects(before({ tool: "subagent", sessionID: "ses_outside" }), /owns all agent dispatch/);
+  await before({ tool: "read", sessionID: "ses_outside" });
+  agent = "build";
+  await before({ tool: "subagent", sessionID: "ses_outside" });
+});
+
 test("standard instructions include reusable workflow policy without seeded-evaluation rules", () => {
   for (const requirement of [
     /Do not launch agents manually, waive required reviews, reset budgets automatically/,
     /submit another participant's candidate or report/,
-    /All three baseline reviewers must explicitly approve the same final candidate/,
-    /UI work also requires ui-design-reviewer/,
+    /All mandatory and selected reviewers must explicitly approve the same final candidate/,
+    /read every specialist's saved description/,
+    /in parallel/,
     /A clean first review can pass without a repair cycle/,
     /only the owning reviewer may verify a fix or accept\/reject dismissal/,
     /swarm_report_html.*reportRequest\.id.*candidate\.id/,
@@ -63,6 +87,100 @@ test("reporting handoff asks the orchestrator for the structured summary and com
   assert.match(agent, /600-word prose limit/);
 });
 
+test("deny-only dispatch preserves exact and blanket rules; invalid edits cannot disable recovery", async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "swarm-custom-plugin-")));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q"], { cwd: directory });
+  const workflow = { version: 1, reviewers: {
+    baseline: { required: true }, specialist: { required: false },
+  } };
+  const storage = new Map();
+  const hooks = new Map();
+  const basePermissions = [
+    { action: "subagent", resource: "*", effect: "deny" },
+    { action: "subagent", resource: "specialist", effect: "deny" },
+    { action: "subagent", resource: "old-*", effect: "ask" },
+  ];
+  let orchestrator = { permissions: structuredClone(basePermissions) };
+  const tools = new Map();
+  const commands = new Map();
+  const ctx = {
+    location: { directory }, options: {},
+    storage: {
+      get: async key => structuredClone(storage.get(key)),
+      set: async (key, value) => storage.set(key, structuredClone(value)),
+    },
+    agent: { transform: async callback => callback({
+      get: id => id === "orchestrator" ? orchestrator : undefined,
+      update: (id, update) => update(orchestrator),
+    }) },
+    tool: { transform: async callback => callback({ add: tool => tools.set(tool.name, tool) }), hook: async () => {} },
+    command: { transform: async callback => callback({ add: command => commands.set(command.name, command) }) },
+    permission: { hook: async (name, callback) => hooks.set(name, callback) },
+    session: {
+      hook: async () => {},
+      get: async () => ({ agent: "orchestrator", location: { directory } }),
+    },
+    event: { subscribe: ({ signal }) => (async function* () {
+      await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    })() },
+  };
+  const gate = new SwarmController(ctx, directory, { workflow });
+  storage.set(gate.key, {
+    root: "ses_root", location: directory, phase: "REVIEWING", jobs: [], candidate: null,
+    sessions: { "old-specialist": "ses_old" }, history: [],
+    selectedReviewers: ["old-specialist"],
+    workflow: { version: 1, reviewers: {
+      baseline: { required: true }, "old-specialist": { required: false },
+    } },
+  });
+  let cleanup = await setup(ctx, { workflow });
+  t.after(() => cleanup());
+  assert.deepEqual(orchestrator.permissions, basePermissions, "resolved permissions are not rewritten");
+  for (const resource of ["baseline", "specialist", "old-specialist", "builder"]) {
+    for (const effect of ["deny", "ask", "allow"]) {
+      const event = { sessionID: "ses_root", action: "subagent", resources: [resource], effect };
+      await hooks.get("evaluate")(event);
+      assert.equal(event.effect, effect, `${resource}: preserve ${effect}, including blanket decisions`);
+    }
+  }
+  for (const resources of [[], ["unconfigured"], ["baseline", "unconfigured"]]) {
+    const event = { sessionID: "ses_root", action: "subagent", resources, effect: "allow" };
+    await hooks.get("evaluate")(event);
+    assert.equal(event.effect, "deny");
+  }
+  for (const [action, resources, expected] of [
+    ["edit", ["code.js"], "deny"],
+    ["shell", ["touch code.js"], "deny"],
+    ["shell", ["git diff --no-ext-diff --no-textconv"], "allow"],
+  ]) {
+    const event = { sessionID: "ses_old", action, resources, effect: "allow" };
+    await hooks.get("evaluate")(event);
+    assert.equal(event.effect, expected);
+  }
+  await cleanup();
+  orchestrator = { permissions: structuredClone(basePermissions) };
+  // Simulate unreadable/malformed external JSON without changing the checkout.
+  cleanup = await setup(ctx, { readWorkflow: () => { throw new SyntaxError("Malformed workflow JSON"); } });
+  assert(tools.has("swarm_status"), "tools still register with malformed new configuration");
+  assert(commands.has("swarm-resume"), "recovery controls remain available");
+  assert.deepEqual(orchestrator.permissions, basePermissions,
+    "saved reviewer permissions remain untouched without trusting the invalid new configuration");
+  const recoveredDispatch = {
+    sessionID: "ses_root", action: "subagent", resources: ["old-specialist"], effect: "ask",
+  };
+  await hooks.get("evaluate")(recoveredDispatch);
+  assert.equal(recoveredDispatch.effect, "ask", "saved reviewer membership survives invalid edits");
+  const status = JSON.parse((await tools.get("swarm_status").execute({}, { sessionID: "ses_root" })).content);
+  assert.equal(status.phase, "REVIEWING");
+  assert.deepEqual(status.requiredReviewers, ["baseline", "old-specialist"]);
+  const stored = storage.get(gate.key);
+  stored.phase = "CANCELLED";
+  await assert.rejects(tools.get("swarm_start").execute({
+    task: "New task", plan: "PLAN.md",
+  }, { sessionID: "ses_root" }), /Malformed workflow JSON/);
+});
+
 for (const uiChanges of ["none", "web"]) {
   test(`registers V2 APIs, permissions, and a complete scripted run (${uiChanges} UI)`,
     t => scriptedRun(t, uiChanges));
@@ -90,6 +208,7 @@ async function scriptedRun(t, uiChanges) {
       { action: "edit", resource: "*", effect: "ask" },
     ] }],
     ["builder", { system: "placeholder", model: "profile-specific" }],
+    ["orchestrator", { permissions: [] }],
   ]);
   const prompts = [];
   const synthetics = [];
@@ -103,12 +222,24 @@ async function scriptedRun(t, uiChanges) {
       set: async (key, value) => { state.set(key, structuredClone(value)); },
     },
     agent: {
-      get: async ({ agentID }) => ({ id: agentID }),
+      get: async ({ agentID }) => ({ id: agentID, description: `Reviews ${agentID} concerns.` }),
       transform: async callback => callback({
         get: id => agents.get(id), update: (id, update) => update(agents.get(id)),
       }),
     },
-    permission: { assert: async () => {}, hook: hook("permission") },
+    permission: {
+      assert: async ({ sessionID, agent, action, resources }) => {
+        const rules = [...(agents.get(agent)?.permissions ?? []), ...(sessions.get(sessionID)?.permissions ?? [])];
+        const matches = (pattern, value) => pattern === "*" || pattern === value;
+        for (const resource of resources) {
+          const rule = rules.findLast(rule => matches(rule.action, action) && matches(rule.resource, resource));
+          const event = { sessionID, action, resources: [resource], effect: rule?.effect ?? "allow" };
+          await hooks.get("permission:evaluate")(event);
+          if (event.effect === "deny") throw new Error(`Dispatch denied: ${resource}`);
+        }
+      },
+      hook: hook("permission"),
+    },
     tool: {
       transform: async callback => callback({ add: tool => tools.set(tool.name, tool) }),
       hook: hook("tool"),
@@ -155,13 +286,15 @@ async function scriptedRun(t, uiChanges) {
   const configure = () => setup(ctx, { openReport: async file => { openedReports.push(file); } });
   const cleanup = await configure();
   t.after(cleanup);
-  assert.equal(tools.size, 7);
+  assert.equal(tools.size, 8);
   assert.deepEqual([...commands.keys()], ["swarm", "swarm-status", "swarm-resume", "swarm-cancel"]);
   assert.equal(agents.get("builder").system, undefined);
   assert.equal(agents.get("builder").model, "profile-specific");
   assert.equal(agents.get("builder").instructions, "Build instructions");
   assert.deepEqual(agents.get("builder").permissions.at(-1),
     { action: "subagent", resource: "*", effect: "deny" });
+  assert.deepEqual(agents.get("orchestrator").permissions,
+    [], "plugin transforms do not rewrite orchestrator permissions");
 
   await assert.rejects(commands.get("swarm").execute({
     sessionID: "ses_root", prompt: { text: " " },
@@ -189,6 +322,28 @@ async function scriptedRun(t, uiChanges) {
   const active = () => [...state.entries()].find(([key]) => key.endsWith("/active"))[1];
   const invoke = async (name, input, sessionID) => JSON.parse((await tools.get(`swarm_${name}`)
     .execute(input, { sessionID })).content);
+  const select = async () => {
+    assert.equal(active().phase, "SELECTING");
+    const input = {
+      request: active().selectionRequest.id, candidate: active().candidate.id,
+      decisions: [{
+        reviewer: uiReviewer, action: uiChanges === "none" ? "skip" : "invoke",
+        reason: uiChanges === "none" ? "No UI changes need design review." : "Settings changes need usability review.",
+      }],
+    };
+    const before = structuredClone(active());
+    agents.get("orchestrator").permissions.push({ action: "subagent", resource: "*", effect: "deny" });
+    await assert.rejects(invoke("select", input, "ses_root"), /Dispatch denied/);
+    assert.deepEqual(active(), before, "a later blanket deny prevents all review dispatch without changing state");
+    agents.get("orchestrator").permissions.pop();
+    await invoke("select", input, "ses_root");
+    if (uiChanges !== "none") {
+      assert(sessions.has(active().sessions[uiReviewer]));
+      assert(active().jobs.filter(job => job.round === active().round && reviewers.includes(job.role))
+        .every(job => !job.finished),
+        "UI reviewer is dispatched before any baseline reviewer finishes");
+    }
+  };
   const finishUI = async cleanup => {
     if (uiChanges === "none") {
       assert.equal(active().sessions[uiReviewer], undefined);
@@ -279,12 +434,25 @@ async function scriptedRun(t, uiChanges) {
   const reloadedCleanup = await configure();
   t.after(reloadedCleanup);
   assert(subscriber.signal);
+  await select();
   assert.equal(active().phase, "REVIEWING");
   const testShell = {
     sessionID: run.sessions["test-engineer"], action: "shell", effect: "allow",
   };
   await hooks.get("permission:evaluate")(testShell);
   assert.equal(testShell.effect, "ask");
+  for (const [role, action, expected] of [
+    ["test-engineer", "ui_browser_browser_navigate", "deny"],
+    ["test-engineer", "playwright_browser_navigate", "allow"],
+    ...(uiChanges === "none" ? [] : [
+      [uiReviewer, "playwright_browser_navigate", "deny"],
+      [uiReviewer, "ui_browser_browser_navigate", "allow"],
+    ]),
+  ]) {
+    const event = { sessionID: active().sessions[role], action, resources: ["*"], effect: "allow" };
+    await hooks.get("permission:evaluate")(event);
+    assert.equal(event.effect, expected, `${role}: ${action}`);
+  }
   for (const role of ["adversarial-reviewer", "specification-reviewer"]) {
     for (const command of [
       "touch candidate", "git diff; touch candidate", "git diff --output=code.js",
@@ -363,6 +531,7 @@ async function scriptedRun(t, uiChanges) {
   await finalCleanup();
   const verificationCleanup = await configure();
   t.after(verificationCleanup);
+  await select();
   assert.equal(active().phase, "REVIEWING");
   for (const role of reviewers) {
     await invoke("report", {

@@ -1,5 +1,5 @@
 import { SwarmController } from "./controller.js"
-import { inputs, requiredReviewers } from "./protocol.js"
+import { inputs, requiredReviewers, uiReviewer } from "./protocol.js"
 import { repository } from "./snapshot.js"
 import { orchestratorInstructions } from "./instructions.js"
 import { planCommand } from "./plan.js"
@@ -30,18 +30,35 @@ function view(run) {
 }
 
 export async function setup(ctx, dependencies = {}) {
-    // Global plugins also load outside repositories. Do not change those sessions.
+    let gate
+    // The globally available orchestrator must fail closed even outside Git,
+    // where controller tools and repository-specific hooks are not installed.
+    await ctx.tool.hook("execute.before", async event => {
+      if (event.tool !== "subagent") return
+      const session = await ctx.session.get({ sessionID: event.sessionID })
+      if (session.agent === "orchestrator" || (gate && (await gate.inspect(event.sessionID)).role)) {
+        throw new Error("The swarm controller owns all agent dispatch.")
+      }
+    })
+
+    // Other sessions outside repositories retain their normal behavior.
     let directory
     try {
       directory = await repository(ctx.location.directory)
     } catch {
       return
     }
-    const gate = new SwarmController(ctx, directory, {
+    gate = new SwarmController(ctx, directory, {
       maxRounds: ctx.options.maxRounds,
       timeout: ctx.options.timeoutMinutes === undefined ? undefined : ctx.options.timeoutMinutes * 60_000,
       ...dependencies,
     })
+    const enrolled = await ctx.storage.get(gate.key)
+    const dispatchTargets = new Set([
+      "builder", ...Object.keys(gate.workflow?.reviewers ?? {}),
+      ...(enrolled?.workflow ? Object.keys(enrolled.workflow.reviewers)
+        : enrolled ? [...requiredReviewers(enrolled), uiReviewer] : []),
+    ])
 
     // Markdown creates the builder ID; derive its base prompt and permissions
     // from the resolved Build definition, without assigning a shared model.
@@ -65,6 +82,7 @@ export async function setup(ctx, dependencies = {}) {
           description: {
             start: "Enroll a required plan file for orchestrator review before any builder dispatch.",
             plan: "Orchestrator only: record plan review, targeted questions and user answers; release the builder only when the plan is clear.",
+            select: "Orchestrator only: select specialists by description for this candidate; mandatory and selected reviewers run in parallel.",
             status: "Read authoritative swarm state and recheck candidate contents.",
             triage: "Orchestrator only: classify every open finding as fix or propose dismissal, with reasons.",
             candidate: "Builder only: submit a candidate and a response to every open finding, then stop.",
@@ -84,7 +102,7 @@ export async function setup(ctx, dependencies = {}) {
     await ctx.command.transform(editor => {
       editor.add({
         name: "swarm",
-        description: "Build a task and require all baseline reviewers plus UI design review for UI changes",
+        description: "Build a task with mandatory reviewers and description-selected specialists in parallel",
         execute: async ({ sessionID, prompt }) => {
           const input = planCommand(prompt.text)
           const previous = await ctx.session.get({ sessionID })
@@ -142,7 +160,7 @@ export async function setup(ctx, dependencies = {}) {
       // Limit tools as guidance, not as the authentication boundary. Executors
       // and the permission hook below recheck state at execution time.
       if (state.role !== "orchestrator" && (state.submitted ||
-        ["BLOCKED", "CANCELLED", "APPROVED", "HANDOFF", "REVIEW_HANDOFF", "TRIAGING", "REPORTING"].includes(state.phase))) {
+        ["BLOCKED", "CANCELLED", "APPROVED", "HANDOFF", "SELECTING", "REVIEW_HANDOFF", "TRIAGING", "REPORTING"].includes(state.phase))) {
         for (const name of Object.keys(event.tools)) {
           if (name !== "swarm_status") delete event.tools[name]
         }
@@ -150,11 +168,28 @@ export async function setup(ctx, dependencies = {}) {
     })
     await ctx.permission.hook("evaluate", async event => {
       const state = await gate.inspect(event.sessionID)
+      if (event.action === "subagent") {
+        const session = await ctx.session.get({ sessionID: event.sessionID })
+        if (session.agent === "orchestrator" &&
+          (!event.resources.length || event.resources.some(resource => !dispatchTargets.has(resource)))) {
+          event.effect = "deny"
+          event.message = "Swarm: dispatch is limited to the builder and configured/enrolled reviewers."
+          return
+        }
+        // This is a deny-only boundary. Never relax user deny/ask rules, including
+        // blanket rules, by rewriting the resolved agent permissions or effects.
+      }
       if (!state.role) return
+      if ((state.role === "ui-design-reviewer" && event.action.startsWith("playwright_")) ||
+        (state.role !== "ui-design-reviewer" && event.action.startsWith("ui_browser_"))) {
+        event.effect = "deny"
+        event.message = "Swarm: use your assigned browser server; parallel reviewers must not share browser state."
+        return
+      }
       if (["edit", "shell"].includes(event.action)) {
         const build = state.role === "builder" && state.phase === "BUILDING" && !state.submitted
         const test = state.role === "test-engineer" && state.phase === "REVIEWING" && !state.submitted
-        const readOnlyReview = ["adversarial-reviewer", "specification-reviewer", "ui-design-reviewer"].includes(state.role) &&
+        const readOnlyReview = !["builder", "orchestrator"].includes(state.role) && !test &&
           state.phase === "REVIEWING" && !state.submitted && event.action === "shell" &&
           event.resources.length > 0 && event.resources.every(readOnlyGit)
         if (!(build || readOnlyReview || (test && event.action === "shell"))) {
@@ -166,12 +201,6 @@ export async function setup(ctx, dependencies = {}) {
         }
       }
     })
-    await ctx.tool.hook("execute.before", async event => {
-      if (event.tool !== "subagent") return
-      const state = await gate.inspect(event.sessionID)
-      if (state.role) throw new Error("The swarm controller owns all agent dispatch.")
-    })
-
     const abort = new AbortController()
     const recover = () => gate.reconcile().catch(error => gate.fail(error))
       .catch(error => console.error("swarm recovery failed", error))

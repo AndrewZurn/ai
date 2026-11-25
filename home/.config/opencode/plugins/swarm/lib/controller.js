@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  candidate, inputs, packet, report, requireThat, requiredReviewers, reviewers,
+  candidate, inputs, packet, report, requireThat, requiredReviewers,
   terminal, triage, uiReviewer, validate, validateExecutiveSummary,
 } from "./protocol.js";
 import { snapshot, trackedFiles } from "./snapshot.js";
@@ -8,6 +8,7 @@ import { files, skills, uniqueFiles, uniqueSkills } from "./attachments.js";
 import { recoverReportTemps, writeReport } from "./html-report.js";
 import { openReport } from "./browser.js";
 import { readPlan } from "./plan.js";
+import { readWorkflow, validateWorkflow } from "./workflow.js";
 
 // A location can reload its plugin while old callbacks are finishing. Share the
 // queue in this module, but always reload durable state inside the lock.
@@ -26,6 +27,13 @@ export class SwarmController {
     this.writeReport = options.writeReport ?? writeReport;
     this.openReport = options.openReport ?? openReport;
     this.readPlan = options.readPlan ?? readPlan;
+    // Invalid edits must reject new enrollment, not disable recovery/status for
+    // an existing run whose workflow is already saved in durable storage.
+    try {
+      this.workflow = validateWorkflow(options.workflow ?? (options.readWorkflow ?? readWorkflow)());
+    } catch (error) {
+      this.workflowError = error;
+    }
     requireThat(Number.isInteger(this.maxRounds) && this.maxRounds > 0 &&
       Number.isFinite(this.timeout) && this.timeout > 0, "Invalid swarm limits.");
   }
@@ -116,7 +124,7 @@ export class SwarmController {
       : null;
     this.run.jobs.push({
       role, kind, sessionID, round: this.run.round, id: id("msg"), text: role === "orchestrator" &&
-        !["triage", "html_report", "plan_review"].includes(kind)
+        !["triage", "html_report", "plan_review", "selection"].includes(kind)
         ? `Swarm: ${this.run.phase}. Call swarm_status and report the authoritative outcome. ${this.run.reason ?? ""}`
         : packet(this.run, role),
       sent: false, done: false, priorIdleID,
@@ -135,6 +143,78 @@ export class SwarmController {
       at: this.now(), phase: "TRIAGING", request: this.run.triageRequest,
     });
     await this.enqueue("orchestrator", "triage");
+  }
+
+  async dispatchReviews() {
+    this.run.phase = "REVIEWING";
+    for (const reviewer of requiredReviewers(this.run)) await this.enqueue(reviewer);
+  }
+
+  async authorizeReviewers(roles) {
+    for (const role of roles) {
+      await this.ctx.agent.get({ agentID: role });
+      await this.ctx.permission.assert({
+        sessionID: this.run.root, agent: "orchestrator", action: "subagent", resources: [role],
+      });
+    }
+  }
+
+  async requestSelection() {
+    const specialists = Object.values(this.run.workflow?.reviewers ?? {}).some(entry => !entry.required);
+    if (!specialists) {
+      await this.authorizeReviewers(requiredReviewers(this.run));
+      await this.checkPlan();
+      await this.checkCandidate();
+      if (this.run.phase === "HANDOFF") await this.dispatchReviews();
+      return;
+    }
+    this.run.phase = "SELECTING";
+    this.run.selectionRequest = {
+      id: id("select"), candidate: this.run.candidate.id, requirements: this.requirementsDigest(),
+    };
+    await this.enqueue("orchestrator", "selection");
+  }
+
+  async selectReviewers(input) {
+    requireThat(this.run.phase === "SELECTING", "The run is not accepting reviewer selection.");
+    requireThat(input.request === this.run.selectionRequest.id &&
+      input.candidate === this.run.candidate.id &&
+      this.run.selectionRequest.requirements === this.requirementsDigest(), "Stale reviewer selection.");
+    const specialists = Object.entries(this.run.workflow.reviewers)
+      .filter(([, entry]) => !entry.required).map(([role]) => role);
+    const roles = input.decisions.map(decision => decision.reviewer);
+    requireThat(new Set(roles).size === roles.length && roles.length === specialists.length &&
+      specialists.every(role => roles.includes(role)),
+    "Select invoke/skip exactly once for every specialist, and no mandatory or unknown reviewers.");
+    for (const decision of input.decisions) {
+      requireThat(decision.action === "invoke" || !this.run.selectedReviewers.includes(decision.reviewer),
+        "Previously selected specialists remain required for all repair rounds.");
+    }
+    await this.authorizeReviewers([...new Set([
+      ...requiredReviewers(this.run),
+      ...input.decisions.filter(decision => decision.action === "invoke").map(decision => decision.reviewer),
+    ])]);
+    // A permission prompt can outlive the candidate or this turn's deadline.
+    await this.checkPlan();
+    await this.checkCandidate();
+    requireThat(this.run.phase === "SELECTING", "The run is not accepting reviewer selection.");
+    if (this.now() >= this.job("orchestrator").deadline) {
+      await this.block("Orchestrator reviewer selection finished after its deadline.");
+      return;
+    }
+    // Validate and authorize the complete selection before changing durable state.
+    for (const { reviewer, action } of input.decisions) {
+      if (action === "invoke" && !this.run.selectedReviewers.includes(reviewer)) {
+        this.run.selectedReviewers.push(reviewer);
+        this.run.sessions[reviewer] = id("ses");
+      }
+    }
+    this.run.candidate.reviewers = requiredReviewers(this.run);
+    this.run.candidate.selection = input.decisions;
+    this.run.history.push({ at: this.now(), phase: "REVIEWERS_SELECTED", ...input });
+    this.job("orchestrator").done = true;
+    this.job("orchestrator").finished = true;
+    await this.dispatchReviews();
   }
 
   requirementsDigest() {
@@ -345,7 +425,7 @@ export class SwarmController {
 
   async checkCandidate() {
     if (!this.run?.candidate ||
-      !["HANDOFF", "REVIEWING", "REVIEW_HANDOFF", "TRIAGING", "REPORTING", "APPROVED"].includes(this.run.phase)) return;
+      !["HANDOFF", "SELECTING", "REVIEWING", "REVIEW_HANDOFF", "TRIAGING", "REPORTING", "APPROVED"].includes(this.run.phase)) return;
     try {
       const current = await this.fingerprint(this.directory);
       const digest = this.run.phase === "TRIAGING"
@@ -408,11 +488,21 @@ export class SwarmController {
         "Start the swarm from the canonical repository root, not a nested directory.");
       requireThat(!this.run || terminal(this.run.phase),
         "This checkout already has an active run. Cancel it before starting another.");
+      if (this.workflowError) throw this.workflowError;
       const document = await this.readPlan(this.directory, plan, file => this.ctx.permission.assert({
         sessionID, agent: "orchestrator", action: "read", resources: [file],
       }));
+      const workflow = structuredClone(this.workflow);
+      for (const [role, entry] of Object.entries(workflow.reviewers)) {
+        const agent = await this.ctx.agent.get({ agentID: role });
+        requireThat(typeof agent.description === "string" && agent.description.trim().length > 0,
+          `Reviewer ${role} needs a nonempty description for selection.`);
+        entry.description = agent.description;
+      }
+      const mandatory = Object.entries(workflow.reviewers)
+        .filter(([, entry]) => entry.required).map(([role]) => role);
       // Fail before dispatch if one of the required agents is unavailable or denied.
-      for (const agent of ["builder", ...reviewers]) {
+      for (const agent of ["builder", ...mandatory]) {
         await this.ctx.agent.get({ agentID: agent });
         await this.ctx.permission.assert({
           sessionID, agent: "orchestrator", action: "subagent", resources: [agent],
@@ -437,14 +527,15 @@ export class SwarmController {
         await this.ctx.storage.set(`${this.key}/${this.run.id}`, this.run);
       }
       this.run = {
-        version: 1, id: id("run"), root: sessionID, directory: this.directory,
+        version: 2, id: id("run"), root: sessionID, directory: this.directory,
         location: root.location.directory,
         requirements: task, context, plan: document,
         files: uniqueFiles([...users.flatMap(user => files(user.files)), ...files(attachments.files)]),
         skills: uniqueSkills([...users.flatMap(user => skills(user.skills)), ...skills(attachments.skills)]),
         permissions: root.permissions ?? [],
         phase: "PLAN_REVIEW", round: 0, maxRounds: this.maxRounds,
-        sessions: Object.fromEntries(["builder", ...reviewers].map(role => [role, id("ses")])),
+        workflow, selectedReviewers: [], selectionRequest: null,
+        sessions: Object.fromEntries(["builder", ...mandatory].map(role => [role, id("ses")])),
         jobs: [], findings: [], reports: {}, history: [], candidate: null,
         triageRequest: null, triage: null, reportRequest: null, htmlReport: null,
       };
@@ -466,7 +557,7 @@ export class SwarmController {
     return this.locked(async () => {
       requireThat(this.run, "No swarm run exists in this checkout.");
       const role = await this.authorize(sessionID, name === "candidate" ? ["builder"]
-        : name === "report" ? requiredReviewers(this.run) : ["triage", "report_html", "plan"].includes(name) ? ["orchestrator"]
+        : name === "report" ? requiredReviewers(this.run) : ["triage", "report_html", "plan", "select"].includes(name) ? ["orchestrator"]
         : ["orchestrator", "builder", ...requiredReviewers(this.run)], name === "status");
       await this.checkPlan();
       await this.checkCandidate();
@@ -474,7 +565,9 @@ export class SwarmController {
         requireThat(admitted && admitted === this.job(role)?.id && !this.job(role).cancelled,
           "Stale dispatch: this call belongs to a previous or undispatched turn.");
       }
-      if (name === "plan") {
+      if (name === "select") {
+        requireThat(this.run.phase === "SELECTING", "The run is not accepting reviewer selection.");
+      } else if (name === "plan") {
         requireThat(["PLAN_REVIEW", "CLARIFYING"].includes(this.run.phase), "The run is not accepting plan review.");
       } else if (name === "report_html") {
         requireThat(["REPORTING", "APPROVED"].includes(this.run.phase),
@@ -493,7 +586,9 @@ export class SwarmController {
         await this.flush();
         return this.run;
       }
-      if (name === "plan") {
+      if (name === "select") {
+        await this.selectReviewers(input);
+      } else if (name === "plan") {
         await this.acceptPlan(input);
       } else if (name === "report_html") {
         await this.renderReport(input, signal);
@@ -512,7 +607,7 @@ export class SwarmController {
           at: this.now(), candidate: next.candidate, reports: next.reports,
         });
         candidate(next, input, await this.fingerprint(this.directory));
-        if (requiredReviewers(next).includes(uiReviewer) && !next.sessions[uiReviewer]) {
+        if (!next.workflow && requiredReviewers(next).includes(uiReviewer) && !next.sessions[uiReviewer]) {
           await this.ctx.agent.get({ agentID: uiReviewer });
           await this.ctx.permission.assert({
             sessionID: this.run.root, agent: "orchestrator", action: "subagent", resources: [uiReviewer],
@@ -627,8 +722,8 @@ export class SwarmController {
       }
       if (terminal(this.run.phase)) return;
       const triageJob = this.job("orchestrator");
-      if (["PLAN_REVIEW", "TRIAGING", "REPORTING"].includes(this.run.phase) &&
-        ["plan_review", "triage", "html_report"].includes(triageJob?.kind) &&
+      if (["PLAN_REVIEW", "SELECTING", "TRIAGING", "REPORTING"].includes(this.run.phase) &&
+        ["plan_review", "selection", "triage", "html_report"].includes(triageJob?.kind) &&
         !triageJob.done && this.now() >= triageJob.deadline) {
         await this.block(`Orchestrator ${this.run.phase.toLowerCase()} exceeded its deadline.`);
       }
@@ -659,16 +754,11 @@ export class SwarmController {
         }
       }
       if (this.run.phase === "HANDOFF" && this.job("builder").finished) {
-        this.run.phase = "REVIEWING";
-        // Enqueue under the lock without fail-fast sibling operations that
-        // could keep mutating this.run after a context lookup rejects.
-        // flush() still dispatches the persisted reviewer jobs concurrently.
-        for (const reviewer of reviewers) await this.enqueue(reviewer);
+        await this.requestSelection();
       }
-      // Playwright MCP can share a browser across sessions. Dispatch the UI
-      // reviewer only after the baseline reviewers (including testing) finish.
-      if (this.run.phase === "REVIEWING" && requiredReviewers(this.run).includes(uiReviewer) &&
-        reviewers.every(role => this.job(role)?.finished) &&
+      // Recover older runs without changing their enrolled reviewer membership.
+      if (!this.run.workflow && this.run.phase === "REVIEWING" &&
+        requiredReviewers(this.run).includes(uiReviewer) &&
         this.job(uiReviewer)?.round !== this.run.round) {
         await this.enqueue(uiReviewer);
       }

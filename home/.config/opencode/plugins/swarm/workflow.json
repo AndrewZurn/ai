@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "reviewers": {
+    "adversarial-reviewer": { "required": true },
+    "test-engineer": { "required": true },
+    "specification-reviewer": { "required": true },
+    "ui-design-reviewer": { "required": false }
+  }
+}

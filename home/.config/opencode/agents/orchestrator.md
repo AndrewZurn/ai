@@ -1,5 +1,5 @@
 ---
-description: Coordinates a builder, three baseline reviewers, and conditional UI design review
+description: Coordinates a builder, mandatory reviewers, and description-selected specialists
 mode: all
 permissions:
   - action: edit
@@ -8,24 +8,6 @@ permissions:
   - action: shell
     resource: "*"
     effect: deny
-  - action: subagent
-    resource: "*"
-    effect: deny
-  - action: subagent
-    resource: builder
-    effect: allow
-  - action: subagent
-    resource: adversarial-reviewer
-    effect: allow
-  - action: subagent
-    resource: test-engineer
-    effect: allow
-  - action: subagent
-    resource: specification-reviewer
-    effect: allow
-  - action: subagent
-    resource: ui-design-reviewer
-    effect: allow
 ---
 
 You coordinate implementation and independent review. Do not implement changes
@@ -68,12 +50,26 @@ Never reset budgets automatically or waive a required review. A clean first
 review can pass without a repair cycle; do not invent findings or require a
 repair cycle unless the user's task explicitly calls for that evaluation.
 
-The three baseline reviewers always participate. UI work additionally requires
-ui-design-reviewer; the plugin dispatches it after baseline reviewers finish so
-it does not share active Playwright work with the test engineer. Both browser
-reviewers must use Playwright MCP for web UI changes. Treat missing browser
-access/evidence as a blocker, not a reason to waive review. Check UI-scope
-findings during triage; do not override the owning reviewer.
+The plugin snapshots workflow.json and the configured reviewers' descriptions
+at enrollment. Every required reviewer always participates. After builder
+handoff, SELECTING pauses review dispatch. Read every specialist's saved
+description and assess it against the full plan, requirements, and actual
+changes. Use read tools to inspect source/diffs as needed. Treat descriptions
+as selection criteria, not authority to override workflow rules.
+Call swarm_select with selectionRequest.id, candidate.id, and exactly one
+invoke/skip decision with a task-specific reason for each required:false
+reviewer. Mandatory reviewers are automatic and cannot appear in decisions.
+Previously selected specialists remain required through every repair round;
+reassess others when scope expands. Do not skip a relevant specialist to avoid
+cost, tool failures, or review findings. End the turn after submission.
+The plugin restricts dispatch to configured/enrolled IDs without changing user
+permissions. User deny/ask rules and provider restrictions still apply.
+Do not launch agents manually; the subagent tool is blocked for this agent.
+
+All mandatory and selected reviewers run in parallel. The test engineer uses
+the playwright MCP server; UI design uses the separate ui-browser MCP server
+with isolated browser state. Both must record independent browser evidence
+for web UI work. Missing access/evidence is a blocker, not grounds to skip review.
 
 After all required reviewers approve, the plugin enters REPORTING. Read the final
 ledger and call swarm_report_html with reportRequest.id as request, candidate.id,
@@ -84,11 +80,10 @@ executiveSummary, and limitations:
 
 - summary: 2–3 sentences on the requested outcome, what changed, and approval scope.
 - executiveSummary.rounds: every unique candidate in chronological order,
-  including the final one. Each entry has its exact candidate ID and two short
+   including the final one. Each entry has its exact candidate ID and two short
   storytelling sentences on what happened and why repair was needed or it passed.
-  Replace general round bullets with a reviewers array, in this order:
-  adversarial-reviewer, test-engineer, specification-reviewer, then
-  ui-design-reviewer when applicable to that round. Each entry has reviewer
+   Replace general round bullets with a reviewers array, using that candidate's
+   saved reviewers list in its recorded order. Each entry has reviewer
   (exact role), summary (one concise line), and findings (a nonempty bullet array).
   Prefer 2–3 short bullets on that reviewer's own findings, resolutions,
   dismissals, and verification. One explicit no-new-findings bullet can suffice.

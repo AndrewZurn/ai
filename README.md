@@ -106,12 +106,14 @@ entitlements, live model availability, or the complete OpenCode schema.
 | `personal` | Current Go build/plan models; Go reviewer | `opencode-go`, `mlx`, `local-llama`, `ollama`, `lmstudio`, `vllm` |
 | `work` | OpenAI build/plan; existing OpenAI reviewer | `openai`, `github-copilot` |
 
-Both profiles enable the local [Playwright MCP](https://github.com/microsoft/playwright-mcp)
-server through `npx -y @playwright/mcp@latest`. OpenCode starts it automatically
+Both profiles enable local [Playwright MCP](https://github.com/microsoft/playwright-mcp)
+servers through `npx -y @playwright/mcp@latest`. OpenCode starts them automatically
 after the selected profile is regenerated with `oc2 --setup <name>`. This can
 download the package on first use; setup itself does not install or start it.
-Playwright uses a separate persistent browser profile, not your regular browser
-session. Use `/mcps` to check its connection.
+The `playwright` server uses a separate persistent browser profile, not your
+regular browser session. The `ui-browser` server adds `--isolated` for independent
+UI-specialist checks while the test engineer uses `playwright` in parallel.
+Use `/mcps` to check their connections.
 
 Work keeps the Snyk (`synk`), Lucid, and Datadog MCP servers disabled and blocks the Go usage plugin.
 Copilot is allowed, but no Copilot model ID is assumed: connect the account, check
@@ -148,8 +150,9 @@ tools. `oc2-restart-service` remains an explicit, separate service helper.
    `work-laptop`. Profile discovery requires no script changes.
 2. Set `description` and a non-empty, unique `allowed_providers` list of exact IDs.
 3. Under `config`, set the root `model` and the models for `build`, `plan`,
-   `orchestrator`, `builder`, `adversarial-reviewer`, `test-engineer`, and
-   `specification-reviewer`, and `ui-design-reviewer`. Additional agents and commands can set models too.
+   `orchestrator`, `builder`, and every reviewer in
+   `home/.config/opencode/plugins/swarm/workflow.json`, including specialists.
+   Additional agents and commands can set models too.
    Every explicit model must use an allowed provider. Confirm IDs and variants
    with `/models`; do not guess them.
 4. Add provider/MCP settings under `config`, and an optional absolute
@@ -170,17 +173,25 @@ When adding profile features, update this section and the profile tests.
 #### Mandatory review swarm
 
 The opt-in `orchestrator` uses a local server plugin to dispatch a `builder`,
-then three concurrent baseline reviewers. Completion requires explicit approval from
-`adversarial-reviewer`, `test-engineer`, and `specification-reviewer` for the
-same candidate. UI changes additionally require `ui-design-reviewer`, dispatched
-after the baseline reviewers finish to avoid shared Playwright browser conflicts.
-Both the test engineer and UI design reviewer use Playwright MCP for web UI work;
-non-web UI uses platform-appropriate checks. No UI work means no UI design agent.
+then mandatory and description-selected specialist reviewers in parallel.
+`home/.config/opencode/plugins/swarm/workflow.json` lists reviewer IDs with a
+`required` flag. Defaults keep `adversarial-reviewer`, `test-engineer`, and
+`specification-reviewer` mandatory; `ui-design-reviewer` is a specialist.
+After each builder handoff, the orchestrator reads every specialist description,
+assesses the full task and actual changes, and records an invoke/skip decision
+with a reason. Once selected, a specialist remains required through repair
+rounds. Every mandatory and selected reviewer must approve the same candidate.
+Both browser reviewers use independent Playwright MCP servers for web UI work;
+non-web UI uses platform-appropriate checks.
 The builder records UI scope and evidence; reviewers check that classification.
 Only a finding's owner can verify its fix or accept dismissal.
 Findings first return to the orchestrator for mandatory fix/dismiss triage.
 The builder must follow those decisions; proposed dismissals still need the
 owning reviewer's agreement.
+To add a reviewer, add its agent definition, a model assignment in each profile,
+and a workflow entry. No controller-code or orchestrator-allowlist edit is needed.
+Use `/reload` after workflow edits; active/resumed runs retain their saved
+configuration and agent descriptions.
 After all required reviewers approve, the orchestrator generates a self-contained HTML
 summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
 the browser and records its path in `htmlReport`.

@@ -25,7 +25,7 @@ export function fixture(options = {}) {
       get: async key => structuredClone(data.get(key)),
       set: async (key, value) => { data.set(key, structuredClone(value)); },
     },
-    agent: { get: async ({ agentID }) => ({ id: agentID }) },
+    agent: { get: async ({ agentID }) => ({ id: agentID, description: `Reviews ${agentID} concerns.` }) },
     permission: { assert: async () => {} },
     session: {
       get: async ({ sessionID }) => {
@@ -77,7 +77,18 @@ export function fixture(options = {}) {
     openReport: async file => { openedReports.push(file); },
     now: () => ++clock, ...options,
   };
-  let gate = new SwarmController(ctx, "/repo", dependencies);
+  const controller = () => {
+    const instance = new SwarmController(ctx, "/repo", dependencies);
+    const reconcile = instance.reconcile.bind(instance);
+    instance.reconcile = async () => {
+      await reconcile();
+      if (options.autoSelect !== false && state()?.phase === "SELECTING") {
+        await instance.tool("select", selectionInput({ state }), "ses_root");
+      }
+    };
+    return instance;
+  };
+  let gate = controller();
   const state = () => structuredClone(data.get(gate.key));
   const approvePlan = async () => {
     if (state()?.phase === "PLAN_REVIEW" && options.autoPlan !== false) {
@@ -110,7 +121,7 @@ export function fixture(options = {}) {
     change: () => { digest = "contents-b"; },
     changePlan: () => { planContent = "Revised plan: validate all inputs and add regression tests."; },
     advance: duration => { clock += duration; },
-    restart: () => { gate = new SwarmController(ctx, "/repo", dependencies); return gate; },
+    restart: () => { gate = controller(); return gate; },
     start: async () => {
       await gate.start("ses_root", "Implement the feature", {}, "PLAN.md");
       await approvePlan();
@@ -156,6 +167,269 @@ export const planInput = (f, overrides = {}) => ({
   request: f.state().planReview.request, decision: "ready",
   summary: "Read the complete plan: scope, acceptance criteria and verification are clear.",
   questions: [], answers: [], ...overrides,
+});
+export const selectionInput = (f, overrides = {}) => ({
+  request: f.state().selectionRequest.id, candidate: f.state().candidate.id,
+  decisions: Object.entries(f.state().workflow.reviewers).filter(([, entry]) => !entry.required)
+    .map(([reviewer]) => ({
+      reviewer,
+      action: f.state().selectedReviewers.includes(reviewer) ||
+        f.state().candidate.ui.changes !== "none" ? "invoke" : "skip",
+      reason: f.state().candidate.ui.changes === "none"
+        ? "The parser-only changes do not need the described UI expertise."
+        : "The changed settings screen needs the described design and usability review.",
+    })),
+  ...overrides,
+});
+
+test("specialist selection requires the owner, a current token and complete reasoned decisions", async () => {
+  const f = fixture({ autoSelect: false });
+  await f.start();
+  await f.tool("candidate", candidateInput(), "builder");
+  await f.finish("builder");
+  assert.equal(f.state().phase, "SELECTING");
+  assert.equal(f.sessions.size, 2, "no reviewer starts before selection");
+  const valid = selectionInput(f);
+  await assert.rejects(f.tool("select", valid, "builder"), /cannot perform/);
+  const before = f.state();
+  for (const invalid of [
+    { ...valid, request: "stale" },
+    { ...valid, candidate: "stale" },
+    { ...valid, decisions: [] },
+    { ...valid, decisions: [...valid.decisions, ...valid.decisions] },
+    { ...valid, decisions: [{ reviewer: reviewers[0], action: "skip", reason: "Skip mandatory" }] },
+    { ...valid, decisions: [{ reviewer: "unknown", action: "invoke", reason: "Unknown" }] },
+    { ...valid, decisions: [{ ...valid.decisions[0], reason: " " }] },
+    { ...valid, decisions: [{ ...valid.decisions[0], action: "maybe" }] },
+  ]) {
+    await assert.rejects(f.tool("select", invalid), /Stale|every specialist|cannot be empty|invalid choice/);
+    assert.deepEqual(f.state(), before);
+  }
+  const prompt = [...f.deliveries.values()].at(-1).text;
+  assert.match(prompt, /Reviews ui-design-reviewer concerns/);
+  assert.match(prompt, /actual candidate changes/);
+  await f.tool("select", valid);
+  assert.equal(f.state().phase, "REVIEWING");
+  assert.deepEqual(requiredReviewers(f.state()), reviewers);
+  assert.deepEqual(f.state().candidate.selection, valid.decisions);
+  await assert.rejects(f.tool("select", valid), /not accepting/);
+});
+
+test("custom specialists are selected by description, run in parallel and retain approval ownership", async () => {
+  const role = "security-reviewer";
+  const workflow = {
+    version: 1, reviewers: {
+      ...Object.fromEntries(reviewers.map(reviewer => [reviewer, { required: true }])),
+      [role]: { required: false },
+    },
+  };
+  const f = fixture({ workflow, autoSelect: false });
+  f.ctx.agent.get = async ({ agentID }) => ({
+    id: agentID, description: agentID === role
+      ? "Review authentication, authorization and credential handling changes." : `Review ${agentID}.`,
+  });
+  await f.start();
+  await f.tool("candidate", candidateInput(), "builder");
+  await f.finish("builder");
+  assert.match([...f.deliveries.values()].at(-1).text, /authentication, authorization/);
+  const invoke = () => ({
+    request: f.state().selectionRequest.id, candidate: f.state().candidate.id,
+    decisions: [{ reviewer: role, action: "invoke", reason: "The parser handles authorization tokens." }],
+  });
+  const first = invoke();
+  await f.tool("select", first);
+  const specialist = f.state().sessions[role];
+  assert.deepEqual(requiredReviewers(f.state()), [...reviewers, role]);
+  assert(f.sessions.has(specialist));
+  assert(f.state().jobs.filter(job => reviewers.includes(job.role)).every(job => !job.finished));
+  for (const reviewer of reviewers) await f.tool("report", reportInput(f), reviewer);
+  assert.equal(f.state().phase, "REVIEWING", "mandatory approvals do not replace a selected specialist");
+  await f.tool("report", reportInput(f, { verdict: "changes_requested", findings: [finding] }), role);
+  const findingID = `${role}:${finding.id}`;
+  assert.equal(f.state().findings[0].id, findingID);
+  await f.tool("triage", triageInput(f));
+  await f.tool("candidate", candidateInput([{ findingID, action: "fixed", reason: "Added token validation." }]), "builder");
+  await f.finish("builder");
+  await assert.rejects(f.tool("select", first), /Stale/);
+  const before = f.state();
+  await assert.rejects(f.tool("select", {
+    ...invoke(), decisions: [{ reviewer: role, action: "skip", reason: "Latest repair seems small." }],
+  }), /remain required/);
+  assert.deepEqual(f.state(), before);
+  await f.tool("select", invoke());
+  assert.equal(f.state().sessions[role], specialist, "reuse the finding owner's session");
+  for (const reviewer of reviewers) await f.tool("report", reportInput(f), reviewer);
+  await f.tool("report", reportInput(f, {
+    decisions: [{ findingID, outcome: "resolved", reason: "Original reproduction and token checks pass." }],
+  }), role);
+  assert.equal(f.state().phase, "APPROVED");
+  assert.deepEqual(roundReviewers(reviewRounds(f.state())[0]), [...reviewers, role]);
+  assert(f.writtenReports[0].narrative.executiveSummary.rounds.every(round =>
+    round.reviewers.at(-1).reviewer === role));
+});
+
+test("selection recovery freezes configuration and descriptions and does not duplicate dispatch", async () => {
+  const workflow = { version: 1, reviewers: {
+    baseline: { required: true }, specialist: { required: false },
+  } };
+  const f = fixture({ workflow, autoSelect: false });
+  await f.start();
+  await f.tool("candidate", candidateInput(), "builder");
+  await f.finish("builder");
+  const before = f.state();
+  const deliveries = f.deliveries.size;
+  workflow.reviewers = { replacement: { required: true } };
+  f.ctx.agent.get = async ({ agentID }) => ({ id: agentID, description: "Changed live description." });
+  await f.restart().reconcile();
+  assert.deepEqual(f.state(), before);
+  assert.equal(f.deliveries.size, deliveries);
+  assert.equal(f.state().workflow.reviewers.specialist.description, "Reviews specialist concerns.");
+  await f.tool("select", {
+    request: before.selectionRequest.id, candidate: before.candidate.id,
+    decisions: [{ reviewer: "specialist", action: "invoke", reason: "The full task needs this expertise." }],
+  });
+  await f.restart().reconcile();
+  assert.deepEqual(requiredReviewers(f.state()), ["baseline", "specialist"]);
+  assert.equal(f.state().jobs.filter(job => job.role === "specialist").length, 1);
+  assert.equal(f.state().sessions.replacement, undefined);
+});
+
+test("invalid new workflow edits do not prevent saved selection, repairs or status", async () => {
+  const workflow = { version: 1, reviewers: {
+    baseline: { required: true }, specialist: { required: false },
+  } };
+  const f = fixture({ workflow, autoSelect: false });
+  await f.start();
+  await f.tool("candidate", candidateInput(), "builder");
+  await f.finish("builder");
+  const selection = {
+    request: f.state().selectionRequest.id, candidate: f.state().candidate.id,
+    decisions: [{ reviewer: "specialist", action: "invoke", reason: "The task needs its described expertise." }],
+  };
+  workflow.version = 999;
+  await f.restart().reconcile();
+  assert.equal(f.state().phase, "SELECTING");
+  assert.equal((await f.tool("status", {})).workflow.version, 1);
+  await f.tool("select", selection);
+  await f.tool("report", reportInput(f, { verdict: "changes_requested", findings: [finding] }), "specialist");
+  await f.tool("report", reportInput(f), "baseline");
+  await f.restart().reconcile();
+  assert.equal(f.state().phase, "TRIAGING");
+  await f.tool("triage", triageInput(f));
+  const findingID = `specialist:${finding.id}`;
+  await f.tool("candidate", candidateInput([{ findingID, action: "fixed", reason: "Fixed and checked." }]), "builder");
+  await f.finish("builder");
+  await f.tool("select", { ...selection, request: f.state().selectionRequest.id, candidate: f.state().candidate.id });
+  await f.tool("report", reportInput(f), "baseline");
+  await f.tool("report", reportInput(f, {
+    decisions: [{ findingID, outcome: "resolved", reason: "Verified the repair." }],
+  }), "specialist");
+  assert.equal(f.state().phase, "APPROVED");
+  await assert.rejects(f.start(), /Invalid swarm workflow/);
+  assert.equal(f.state().phase, "APPROVED", "invalid new enrollment cannot replace the saved run");
+});
+
+test("new scope can add a previously skipped specialist in a later round", async () => {
+  const f = fixture({ autoSelect: false });
+  await f.start();
+  await f.tool("candidate", candidateInput(), "builder");
+  await f.finish("builder");
+  await f.tool("select", selectionInput(f));
+  for (const role of reviewers) {
+    await f.tool("report", reportInput(f, role === reviewers[0] ? {
+      verdict: "changes_requested", summary: "The requirements also affect the visible error state.",
+    } : {}), role);
+  }
+  await f.tool("triage", triageInput(f));
+  await f.tool("candidate", {
+    ...candidateInput(), ui: { changes: "web", evidence: "The error state changed on /settings." },
+  }, "builder");
+  await f.finish("builder");
+  await f.tool("select", selectionInput(f));
+  assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
+  const rounds = reviewRounds(f.state());
+  assert.deepEqual(roundReviewers(rounds[0]), reviewers);
+  assert.deepEqual(roundReviewers(rounds[1]), [...reviewers, uiReviewer]);
+});
+
+test("selection deadlines and candidate changes cannot be used to bypass review", async () => {
+  for (const late of [false, true]) {
+    const f = fixture({ autoSelect: false });
+    await f.start();
+    await f.tool("candidate", candidateInput(), "builder");
+    await f.finish("builder");
+    const input = selectionInput(f);
+    if (late) {
+      f.advance(31 * 60 * 1000);
+      await f.tool("select", input);
+    } else {
+      f.change();
+      await assert.rejects(f.tool("select", input), /not accepting/);
+    }
+    assert.equal(f.state().phase, "BLOCKED");
+    assert.equal(f.sessions.size, 2);
+    assert.equal(f.writtenReports.length, 0);
+  }
+});
+
+test("slow selection permissions cannot dispatch after a deadline or changed candidate", async () => {
+  for (const late of [false, true]) {
+    const f = fixture({ autoSelect: false });
+    await f.start();
+    await f.tool("candidate", candidateInput(), "builder");
+    await f.finish("builder");
+    f.ctx.permission.assert = async ({ action }) => {
+      if (action === "subagent") {
+        if (late) f.advance(31 * 60 * 1000);
+        else f.change();
+      }
+    };
+    const input = selectionInput(f, { decisions: [{
+      reviewer: uiReviewer, action: "invoke", reason: "The complete task needs design checks.",
+    }] });
+    if (late) await f.tool("select", input);
+    else await assert.rejects(f.tool("select", input), /not accepting/);
+    assert.equal(f.state().phase, "BLOCKED");
+    assert.equal(f.state().sessions[uiReviewer], undefined);
+    assert.equal(f.sessions.size, 2);
+  }
+});
+
+test("a workflow with only mandatory reviewers dispatches without a selection turn", async () => {
+  const f = fixture({ workflow: { version: 1, reviewers: { safety: { required: true } } } });
+  await reviewReady(f);
+  assert.equal(f.state().selectionRequest, null);
+  assert.deepEqual(requiredReviewers(f.state()), ["safety"]);
+  await f.tool("report", reportInput(f), "safety");
+  assert.equal(f.state().phase, "APPROVED");
+});
+
+test("legacy enrolled runs retain their baseline and UI membership without specialist selection", async () => {
+  const f = fixture();
+  await f.start();
+  const legacy = f.state();
+  delete legacy.workflow;
+  delete legacy.selectedReviewers;
+  delete legacy.selectionRequest;
+  legacy.version = 1;
+  f.data.set(f.gate.key, legacy);
+  await f.tool("candidate", {
+    ...candidateInput(), ui: { changes: "web", evidence: "Legacy settings page work." },
+  }, "builder");
+  await f.finish("builder");
+  assert.equal(f.state().phase, "REVIEWING");
+  assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
+  assert(!f.state().jobs.some(job => job.kind === "selection"));
+  for (const role of [...reviewers, uiReviewer]) await f.tool("report", reportInput(f), role);
+  assert.equal(f.state().phase, "APPROVED");
+});
+
+test("empty reviewer descriptions fail before enrollment or provider dispatch", async () => {
+  const f = fixture();
+  f.ctx.agent.get = async ({ agentID }) => ({ id: agentID, description: " " });
+  await assert.rejects(f.start(), /nonempty description/);
+  assert.equal(f.state(), undefined);
+  assert.equal(f.sessions.size, 1);
 });
 
 test("a required plan is reviewed before any builder exists and only the orchestrator may release it", async () => {
@@ -311,7 +585,7 @@ export async function reviewReady(f) {
 test("builder completes before parallel review dispatch; all three approvals are required", async () => {
   const f = fixture();
   await reviewReady(f);
-  assert.equal(f.deliveries.size, 5);
+  assert.equal(f.deliveries.size, 6);
   const builder = f.sessions.get(f.state().sessions.builder);
   assert.deepEqual(builder.permissions, f.sessions.get("ses_root").permissions);
   const prompt = [...f.deliveries.values()].find(item => item.sessionID === builder.id).text;
@@ -342,20 +616,21 @@ test("UI scope and evidence are required, including an explicit no-UI reason", a
 });
 
 for (const changes of ["web", "non-web"]) {
-  test(`${changes} UI requires a fourth approval after baseline browser work finishes`, async () => {
+  test(`${changes} UI specialist runs in parallel and requires a fourth approval`, async () => {
     const f = fixture({ autoFinish: false });
     await f.start();
     const ui = { changes, evidence: "Changed settings screen. Test URL: http://localhost:3000/settings" };
     await f.tool("candidate", { ...candidateInput(), ui }, "builder");
     assert.deepEqual(f.state().candidate.ui, ui);
-    assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
     await f.finish("builder");
-    assert.equal(f.deliveries.size, 5);
-    assert(!f.sessions.has(f.state().sessions[uiReviewer]), "UI reviewer not launched yet");
+    assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
+    assert.equal(f.deliveries.size, 7);
+    assert(f.sessions.has(f.state().sessions[uiReviewer]), "UI reviewer launched with baseline reviewers");
+    assert(f.state().jobs.filter(job => reviewers.includes(job.role)).every(job => !job.finished));
     for (const role of reviewers) await f.tool("report", reportInput(f), role);
     assert.equal(f.state().phase, "REVIEWING", "three approvals cannot complete UI review");
     for (const role of reviewers.filter(role => role !== "test-engineer")) await f.finish(role);
-    assert(!f.state().jobs.some(job => job.role === uiReviewer), "test engineer still owns browser");
+    assert(f.state().jobs.some(job => job.role === uiReviewer), "UI review does not wait for the test engineer");
     await f.finish("test-engineer");
     assert.equal(f.state().jobs.at(-1).role, uiReviewer);
     assert.equal(f.state().phase, "REVIEWING");
@@ -413,7 +688,6 @@ async function verifyUIRepair(changes) {
   assert(f.state().uiReviewRequired);
   assert.equal(f.state().candidate.ui.changes, changes);
   await f.finish("builder");
-  await assert.rejects(f.tool("report", reportInput(f), uiReviewer), /not been dispatched/);
   await assert.rejects(f.tool("report", reportInput(f, {
     decisions: [{ findingID, outcome: "resolved", reason: "Not the owner" }],
   }), "test-engineer"), /owned by this reviewer/);
@@ -426,36 +700,34 @@ async function verifyUIRepair(changes) {
   assert.equal(f.state().phase, "APPROVED");
 }
 
-test("missing UI reviewer is irrelevant to non-UI work but prevents UI candidate handoff", async () => {
+test("every configured reviewer needs an available description at enrollment", async () => {
   const f = fixture();
   const checked = [];
   f.ctx.agent.get = async ({ agentID }) => {
     checked.push(agentID);
     if (agentID === uiReviewer) throw new Error("UI reviewer unavailable");
-    return { id: agentID };
+    return { id: agentID, description: "Review the candidate" };
   };
-  await f.start();
-  assert(!checked.includes(uiReviewer));
-  await assert.rejects(f.tool("candidate", {
-    ...candidateInput(), ui: { changes: "web", evidence: "Changed a form" },
-  }, "builder"), /UI reviewer unavailable/);
-  assert.equal(f.state().phase, "BUILDING");
-  assert.equal(f.state().candidate, null);
-  assert.equal(f.state().uiReviewRequired, undefined);
+  await assert.rejects(f.start(), /UI reviewer unavailable/);
+  assert(checked.includes(uiReviewer));
+  assert.equal(f.state(), undefined);
+  assert.equal(f.deliveries.size, 0);
 });
 
 test("denied UI reviewer dispatch and blocked UI browser checks cannot approve", async () => {
-  const f = fixture();
+  const f = fixture({ autoSelect: false });
   await f.start();
   f.ctx.permission.assert = async ({ resources }) => {
     if (resources.includes(uiReviewer)) throw new Error("UI review permission denied");
   };
   const input = { ...candidateInput(), ui: { changes: "web", evidence: "Changed a form" } };
-  await assert.rejects(f.tool("candidate", input, "builder"), /permission denied/);
-  assert.equal(f.state().round, 0);
-  f.ctx.permission.assert = async () => {};
   await f.tool("candidate", input, "builder");
   await f.finish("builder");
+  const before = f.state();
+  await assert.rejects(f.tool("select", selectionInput(f)), /permission denied/);
+  assert.deepEqual(f.state(), before);
+  f.ctx.permission.assert = async () => {};
+  await f.tool("select", selectionInput(f));
   for (const role of reviewers) await f.tool("report", reportInput(f), role);
   await f.tool("report", reportInput(f, {
     verdict: "blocked", summary: "Playwright MCP cannot reach the test app",
@@ -590,7 +862,7 @@ test("restart recovers handoff and never duplicates review dispatch", async () =
   await f.restart().reconcile();
   assert.equal(f.state().phase, "REVIEWING");
   await f.gate.reconcile();
-  assert.equal(f.deliveries.size, 5);
+  assert.equal(f.deliveries.size, 6);
   await Promise.all(reviewers.map(role => f.tool("report", reportInput(f), role)));
   assert.equal(f.state().phase, "APPROVED");
 });
@@ -831,7 +1103,7 @@ test("failed reporting notifications are not retried into ordinary Build", async
   f.sessions.get("ses_root").agent = "build";
   f.ctx.session.prompt = original;
   await f.restart().reconcile();
-  assert.equal([...f.deliveries.values()].filter(prompt => prompt.sessionID === "ses_root").length, 1);
+  assert.equal([...f.deliveries.values()].filter(prompt => prompt.sessionID === "ses_root").length, 2);
   assert(f.state().jobs.findLast(job => job.role === "orchestrator").cancelled);
 });
 

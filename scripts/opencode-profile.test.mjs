@@ -14,7 +14,8 @@ function fixture(t) {
   const repo = path.join(root, "repo");
   const home = path.join(root, "home");
   const configDir = path.join(home, ".config/opencode");
-  for (const dir of ["scripts", "home/.local/bin", "config/opencode/profiles"]) {
+  for (const dir of ["scripts", "home/.local/bin", "config/opencode/profiles",
+    "home/.config/opencode/plugins/swarm/lib"]) {
     fs.mkdirSync(path.join(repo, dir), { recursive: true });
   }
   for (const file of [
@@ -23,6 +24,8 @@ function fixture(t) {
     "config/opencode/common.json",
     "config/opencode/profiles/personal.json",
     "config/opencode/profiles/work.json",
+    "home/.config/opencode/plugins/swarm/lib/workflow.js",
+    "home/.config/opencode/plugins/swarm/workflow.json",
   ]) fs.copyFileSync(path.join(repoRoot, file), path.join(repo, file));
   fs.mkdirSync(configDir, { recursive: true });
   const bin = path.join(home, ".local/bin");
@@ -112,7 +115,7 @@ test("work setup merges config and appends a closed provider allowlist", t => {
   assert(config.policies.some(rule => rule.action === "plugin.use" && rule.effect === "deny" &&
     rule.resource === "*go-usage*"));
   assert.equal(config.providers, undefined);
-  assert.deepEqual(Object.keys(config.mcp.servers).sort(), ["datadog", "lucid", "playwright", "synk"]);
+  assert.deepEqual(Object.keys(config.mcp.servers).sort(), ["datadog", "lucid", "playwright", "synk", "ui-browser"]);
   for (const name of ["synk", "lucid", "datadog"]) {
     assert.equal(config.mcp.servers[name].disabled, true);
   }
@@ -131,7 +134,7 @@ test("personal defaults use Go with local providers, without work settings", t =
     assert.match(config.agents[agent].model, /^opencode-go\//);
   }
   assert(config.providers.mlx);
-  assert.deepEqual(Object.keys(config.mcp.servers), ["playwright"]);
+  assert.deepEqual(Object.keys(config.mcp.servers), ["playwright", "ui-browser"]);
   const result = f.run(["path with spaces", "--flag", "*.ts"], { OPENCODE_PROFILE: "work" });
   assert.equal(result.status, 17);
   assert.deepEqual(JSON.parse(result.stdout), {
@@ -140,13 +143,16 @@ test("personal defaults use Go with local providers, without work settings", t =
 });
 
 for (const profile of ["personal", "work"]) {
-  test(`${profile} enables the shared Playwright MCP server`, t => {
+  test(`${profile} enables independent browser servers for parallel reviewers`, t => {
     const f = fixture(t);
     success(f.run(["--setup", profile]));
     assert.deepEqual(f.config().mcp.servers.playwright, {
       type: "local",
       command: ["npx", "-y", "@playwright/mcp@latest"],
       disabled: false,
+    });
+    assert.deepEqual(f.config().mcp.servers["ui-browser"], {
+      type: "local", command: ["npx", "-y", "@playwright/mcp@latest", "--isolated"], disabled: false,
     });
   });
 }
@@ -330,6 +336,20 @@ test("swarm agents are model-neutral and every profile requires their models", t
   }
 });
 
+test("adding a configured specialist requires a profile model without changing the validator", t => {
+  const f = fixture(t);
+  const workflow = path.join(f.repo, "home/.config/opencode/plugins/swarm/workflow.json");
+  f.edit(workflow, value => { value.reviewers["security-reviewer"] = { required: false }; });
+  assert.match(f.run(["--setup", "work"]).stderr, /Missing model for agents.security-reviewer/);
+  f.edit(f.profileFile("work"), profile => {
+    profile.config.agents["security-reviewer"] = { model: profile.config.agents["test-engineer"].model };
+  });
+  success(f.run(["--setup", "work"]));
+  assert(f.config().agents["security-reviewer"].model.startsWith("openai/"));
+  f.edit(workflow, value => { value.reviewers["security-reviewer"].after = []; });
+  assert.match(f.run(["--setup", "work"]).stderr, /Invalid swarm workflow/);
+});
+
 test("UI reviewers require independent Playwright MCP evidence without granting write or install access", () => {
   for (const name of ["test-engineer", "ui-design-reviewer"]) {
     const agent = fs.readFileSync(path.join(repoRoot,
@@ -339,6 +359,9 @@ test("UI reviewers require independent Playwright MCP evidence without granting 
     assert.match(agent, /blocked/);
     assert.match(agent, /action: edit\s+resource: "\*"\s+effect: deny/);
     assert.match(agent, /action: subagent\s+resource: "\*"\s+effect: deny/);
+    assert.match(agent, name === "test-engineer"
+      ? /action: "ui_browser_\*"\s+resource: "\*"\s+effect: deny/
+      : /action: "playwright_\*"\s+resource: "\*"\s+effect: deny/);
     assert.match(agent, name === "test-engineer"
       ? /action: shell\s+resource: "\*"\s+effect: ask/
       : /action: shell\s+resource: "\*"\s+effect: deny/);

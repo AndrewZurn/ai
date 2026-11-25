@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isTemporaryReportArtifact, reportFilename } from "./artifact-paths.js";
 import {
-  reviewers, requiredReviewers, requireThat, reviewRounds, uiReviewer, validateExecutiveSummary,
+  requiredReviewers, requireThat, reviewRounds, roundReviewers, validateExecutiveSummary,
 } from "./protocol.js";
 
 const escape = value => String(value ?? "").replace(/[&<>"']/g, character => ({
@@ -82,7 +82,7 @@ export function renderReport(run, narrative) {
   const rounds = reviewRounds(run).filter(entry => entry.candidate.id !== run.candidate.id)
     .map(entry => details(entry.candidate.id,
       pre(entry.candidate.summary) + details("Builder evidence", pre(entry.candidate.evidence)) +
-      [...reviewers, uiReviewer].filter(role => entry.reports?.[role]).map(role => `<h4>${escape(role)} —
+       roundReviewers(entry).filter(role => entry.reports?.[role]).map(role => `<h4>${escape(role)} —
         ${escape(entry.reports[role].verdict)}</h4>${pre(entry.reports[role].summary)}
         ${details("Review evidence", pre(entry.reports[role].evidence))}`).join(""),
     )).join("");
@@ -124,6 +124,12 @@ ${section("Run and candidate", fields([
     ["Generated", new Date(run.reportRequest.created).toISOString()],
   ]))}
 ${section("Final review verdicts", verdicts)}
+${run.workflow ? section("Reviewer selection", details("Saved configuration and agent descriptions", pre(JSON.stringify(run.workflow, null, 2))) +
+    run.history.filter(entry => entry.phase === "REVIEWERS_SELECTED").map(entry =>
+      `<article><h3>${escape(entry.candidate)}</h3><p>Mandatory reviewers were included automatically.</p>${
+        fields(entry.decisions.map(decision => [
+          `${decision.reviewer}: ${decision.action}`, decision.reason,
+        ]))}</article>`).join("")) : ""}
 ${section("Orchestrator triage", triageHistory)}
 ${section("Findings, fixes, and owner verification", findings)}
 ${section("Final implementation and test evidence", pre(run.candidate.summary) + pre(run.candidate.evidence) + pre(run.candidate.ui?.evidence))}
