@@ -1,0 +1,594 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  candidate, inputs, packet, report, requireThat, reviewers, terminal, triage, validate,
+} from "./protocol.js";
+import { snapshot, trackedFiles } from "./snapshot.js";
+import { files, skills, uniqueFiles, uniqueSkills } from "./attachments.js";
+import { recoverReportTemps, writeReport } from "./html-report.js";
+import { openReport } from "./browser.js";
+
+// A location can reload its plugin while old callbacks are finishing. Share the
+// queue in this module, but always reload durable state inside the lock.
+const queues = new Map();
+const id = prefix => `${prefix}_${randomUUID().replaceAll("-", "")}`;
+
+export class SwarmController {
+  constructor(ctx, directory, options = {}) {
+    this.ctx = ctx;
+    this.directory = directory;
+    this.key = `runs/${createHash("sha256").update(directory).digest("hex")}/active`;
+    this.snapshot = options.snapshot ?? snapshot;
+    this.now = options.now ?? Date.now;
+    this.maxRounds = options.maxRounds ?? 5;
+    this.timeout = options.timeout ?? 30 * 60 * 1000;
+    this.writeReport = options.writeReport ?? writeReport;
+    this.openReport = options.openReport ?? openReport;
+    requireThat(Number.isInteger(this.maxRounds) && this.maxRounds > 0 &&
+      Number.isFinite(this.timeout) && this.timeout > 0, "Invalid swarm limits.");
+  }
+
+  async locked(action) {
+    const previous = queues.get(this.key) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+      const stored = await this.ctx.storage.get(this.key);
+      this.run = stored ? structuredClone(stored) : null;
+      return action();
+    });
+    queues.set(this.key, next);
+    try {
+      return await next;
+    } finally {
+      if (queues.get(this.key) === next) queues.delete(this.key);
+    }
+  }
+
+  async save() {
+    await this.ctx.storage.set(this.key, this.run);
+  }
+
+  async fingerprint(directory) {
+    const artifacts = await this.artifacts();
+    if (artifacts.some(entry => entry.kind === "temporary")) {
+      await recoverReportTemps(directory, {
+        artifacts, tracked: await trackedFiles(directory),
+        record: entry => this.recordArtifact(entry),
+      });
+    }
+    return this.snapshot(directory, await this.artifacts());
+  }
+
+  async artifacts() {
+    return await this.ctx.storage.get(`${this.key}/artifacts`) ?? [];
+  }
+
+  async recordArtifact(entry) {
+    const artifacts = (await this.artifacts()).filter(record => record.file !== entry.file);
+    if (!entry.remove) artifacts.push(entry);
+    await this.ctx.storage.set(`${this.key}/artifacts`, artifacts);
+  }
+
+  role(sessionID) {
+    if (!this.run) return null;
+    if (sessionID === this.run.root) return "orchestrator";
+    return Object.keys(this.run.sessions).find(role => this.run.sessions[role] === sessionID) ?? null;
+  }
+
+  async authorize(sessionID, expected, historical = false) {
+    const role = this.role(sessionID);
+    requireThat(role && expected.includes(role), "This session cannot perform this transition.");
+    const session = await this.ctx.session.get({ sessionID });
+    requireThat((historical && role === "orchestrator") || session.agent === role,
+      "The registered session's agent has changed.");
+    requireThat(session.location?.directory === this.run.location,
+      "A managed session moved to another location.");
+    requireThat(role === "orchestrator" || session.parentID === this.run.root,
+      "Reviewer/builder session does not belong to this orchestrator.");
+    return role;
+  }
+
+  job(role) {
+    return this.run.jobs.findLast(job => job.role === role);
+  }
+
+  async messages(sessionID, type) {
+    return [...await this.ctx.session.context({ sessionID })].reverse()
+      .filter(message => !type || message.type === type);
+  }
+
+  async outcome(job) {
+    const session = await this.ctx.session.get({ sessionID: job.sessionID });
+    if (session.time.busy > (session.time.idle ?? 0)) return;
+    // Record the previous idle ID before admitting each prompt. Sessions are
+    // never reused while still running, so a different durable idle marker
+    // belongs to this turn even if compaction removed the original prompt.
+    const idle = (await this.messages(job.sessionID, "idle"))[0];
+    if (job.sent && idle?.id !== job.priorIdleID) return idle;
+  }
+
+  async enqueue(role, kind = role === "orchestrator" ? "notification" : "work") {
+    const sessionID = role === "orchestrator" ? this.run.root : this.run.sessions[role];
+    const previous = this.job(role);
+    const priorIdleID = previous
+      ? (await this.messages(sessionID, "idle"))[0]?.id ?? previous.completionID ?? null
+      : null;
+    this.run.jobs.push({
+      role, kind, sessionID, id: id("msg"), text: role === "orchestrator" &&
+        !["triage", "html_report"].includes(kind)
+        ? `Swarm: ${this.run.phase}. Call swarm_status and report the authoritative outcome. ${this.run.reason ?? ""}`
+        : packet(this.run, role),
+      sent: false, done: false, priorIdleID,
+      created: this.now(), deadline: this.now() + this.timeout,
+    });
+  }
+
+  async requestTriage() {
+    const fingerprint = await this.fingerprint(this.directory);
+    this.run.phase = "TRIAGING";
+    this.run.triage = null;
+    this.run.triageRequest = {
+      id: id("triage"), candidate: this.run.candidate.id, digest: fingerprint.digest,
+    };
+    this.run.history.push({
+      at: this.now(), phase: "TRIAGING", request: this.run.triageRequest,
+    });
+    await this.enqueue("orchestrator", "triage");
+  }
+
+  requirementsDigest() {
+    return createHash("sha256").update(JSON.stringify({
+      requirements: this.run.requirements, context: this.run.context,
+      files: this.run.files, skills: this.run.skills,
+    })).digest("hex");
+  }
+
+  approvedReviews() {
+    return this.run.candidate && reviewers.every(role =>
+      this.run.reports[role]?.verdict === "approve" &&
+      this.run.reports[role].candidate === this.run.candidate.id) &&
+      !this.run.findings.some(finding => finding.status === "open");
+  }
+
+  async requestReport() {
+    requireThat(this.approvedReviews(), "HTML reporting requires three matching reviewer approvals.");
+    this.run.phase = "REPORTING";
+    this.run.reportRequest = {
+      id: id("html"), candidate: this.run.candidate.id,
+      requirements: this.requirementsDigest(), created: this.now(),
+    };
+    this.run.reportDraft = null;
+    this.run.reportError = null;
+    this.run.htmlReport = null;
+    this.run.history.push({
+      at: this.now(), phase: "REPORTING", candidate: this.run.candidate.id,
+      request: this.run.reportRequest.id,
+    });
+    await this.enqueue("orchestrator", "html_report");
+  }
+
+  async renderReport(input, signal) {
+    signal?.throwIfAborted();
+    requireThat(["REPORTING", "APPROVED"].includes(this.run.phase),
+      "The run is not accepting an HTML report.");
+    requireThat(input.request === this.run.reportRequest?.id &&
+      input.candidate === this.run.candidate.id &&
+      this.run.reportRequest.requirements === this.requirementsDigest(),
+    "Stale HTML report request or candidate.");
+    requireThat(this.approvedReviews(), "HTML reporting requires three matching reviewer approvals.");
+    if (this.run.reportDraft) {
+      requireThat(JSON.stringify(this.run.reportDraft) === JSON.stringify(input),
+        "The report narrative is already recorded; retry with the same content.");
+    }
+    if (this.run.phase === "APPROVED" && this.run.htmlReport?.request === input.request) return;
+    this.run.reportDraft = input;
+    await this.save(); // Freeze the narrative and generation time before file I/O.
+    let artifact;
+    try {
+      signal?.throwIfAborted();
+      artifact = await this.writeReport(structuredClone(this.run), input, {
+        artifacts: await this.artifacts(), record: entry => this.recordArtifact(entry),
+      });
+      signal?.throwIfAborted();
+    } catch (error) {
+      this.run.reportError = error.message;
+      await this.save();
+      throw error;
+    }
+    await this.checkCandidate();
+    if (this.run.phase !== "REPORTING") return;
+    if (this.now() >= this.job("orchestrator").deadline) {
+      await this.block("Orchestrator HTML reporting finished after its deadline.");
+      return;
+    }
+    this.run.htmlReport = { ...artifact, request: input.request, browser: { state: "requested" } };
+    this.run.reportError = null;
+    this.run.phase = "APPROVED";
+    this.job("orchestrator").done = true;
+    this.job("orchestrator").finished = true;
+    this.run.history.push({
+      at: this.now(), phase: "APPROVED", candidate: this.run.candidate.id, report: artifact.path,
+    });
+    // At-most-once launch attempt: a retry must not open duplicate browser tabs.
+    await this.save();
+    try {
+      await this.openReport(artifact.path, signal);
+      this.run.htmlReport.browser = { state: "opened" };
+    } catch (error) {
+      this.run.htmlReport.browser = { state: "failed", error: error.message };
+    }
+    await this.save();
+  }
+
+  async stopParticipants() {
+    const participants = [...new Set(this.run.jobs
+      .filter(job => job.role !== "orchestrator").map(job => job.sessionID))];
+    const results = await Promise.allSettled(participants.map(async sessionID => {
+      try {
+        await this.ctx.session.get({ sessionID });
+      } catch (error) {
+        if (error?._tag === "SessionNotFoundError") return;
+        throw error;
+      }
+      await this.ctx.session.interrupt({ sessionID, resume: false });
+      const stopped = await this.ctx.session.get({ sessionID });
+      requireThat(!(stopped.time.busy > (stopped.time.idle ?? 0)),
+        `Session ${sessionID} is still running.`);
+    }));
+    return results.flatMap((result, index) => result.status === "rejected"
+      ? [{ sessionID: participants[index], reason: result.reason?.message ?? String(result.reason) }]
+      : []);
+  }
+
+  async block(reason, phase = "BLOCKED") {
+    this.run.phase = phase;
+    this.run.reason = reason;
+    this.run.history.push({
+      at: this.now(), phase, reason, candidate: this.run.candidate, reports: this.run.reports,
+    });
+    // Persist the failure before cancellation: late reports can never approve.
+    for (const job of this.run.jobs) {
+      job.done = true;
+      job.cancelled = true;
+    }
+    const root = await this.ctx.session.get({ sessionID: this.run.root }).catch(() => null);
+    if (root?.agent === "orchestrator" && root.location.directory === this.run.location) {
+      await this.enqueue("orchestrator");
+    }
+    await this.save();
+    this.run.stopFailures = await this.stopParticipants();
+    await this.save();
+  }
+
+  async checkCandidate() {
+    if (!this.run?.candidate ||
+      !["HANDOFF", "REVIEWING", "REVIEW_HANDOFF", "TRIAGING", "REPORTING", "APPROVED"].includes(this.run.phase)) return;
+    try {
+      const current = await this.fingerprint(this.directory);
+      const digest = this.run.phase === "TRIAGING"
+        ? this.run.triageRequest.digest : this.run.candidate.digest;
+      if (current.digest !== digest) {
+        await this.block("Candidate contents changed. Resume to build and obtain three new approvals.");
+      }
+    } catch (error) {
+      await this.block(`Candidate cannot be verified: ${error.message}`);
+    }
+  }
+
+  async flush() {
+    // Session IDs and prompt IDs are saved before dispatch. Both create and
+    // prompt are idempotent in V2, including after a crash between send/save.
+    const pending = this.run.jobs.filter(job => !job.sent && !job.done);
+    const results = await Promise.allSettled(pending.map(async job => {
+      if (job.role !== "orchestrator") {
+        await this.ctx.session.create({
+          id: job.sessionID, parentID: this.run.root, agent: job.role,
+          title: `${job.role}: ${this.run.id}`,
+          // Preserve user session restrictions. The orchestrator's agent-only
+          // read-only rules are not copied; child rules and gate hooks apply.
+          permissions: this.run.permissions,
+          metadata: { reviewGate: this.run.id, role: job.role },
+        });
+      } else {
+        const root = await this.ctx.session.get({ sessionID: job.sessionID }).catch(() => null);
+        if (root?.agent !== "orchestrator" || root.location.directory !== this.run.location) {
+          job.done = true;
+          job.cancelled = true;
+          return;
+        }
+      }
+      await this.ctx.session.prompt({
+        sessionID: job.sessionID, id: job.id, text: job.text,
+        ...(job.role === "orchestrator" ? {} : {
+          files: this.run.files, skills: this.run.skills,
+        }),
+        metadata: { reviewGateInternal: true, run: this.run.id },
+        delivery: "queue",
+      });
+      job.sent = true;
+    }));
+    await this.save();
+    const failure = results.find(result => result.status === "rejected");
+    if (failure && !terminal(this.run.phase)) {
+      await this.block(`Dispatch failed: ${failure.reason.message}`);
+      // Leave the notification in the outbox for status/recovery to retry.
+    }
+  }
+
+  async start(sessionID, task, attachments = {}) {
+    return this.locked(async () => {
+      validate(inputs.start, { task });
+      const root = await this.ctx.session.get({ sessionID });
+      requireThat(root.agent === "orchestrator",
+        "Start from an orchestrator session or use /swarm.");
+      requireThat(root.location.directory === this.directory,
+        "Start the swarm from the canonical repository root, not a nested directory.");
+      requireThat(!this.run || terminal(this.run.phase),
+        "This checkout already has an active run. Cancel it before starting another.");
+      // Fail before dispatch if one of the required agents is unavailable or denied.
+      for (const agent of ["builder", ...reviewers]) {
+        await this.ctx.agent.get({ agentID: agent });
+        await this.ctx.permission.assert({
+          sessionID, agent: "orchestrator", action: "subagent", resources: [agent],
+        });
+      }
+      await this.fingerprint(this.directory); // Require a supported Git checkout.
+      const users = (await this.messages(sessionID, "user")).reverse()
+        .filter(message => !message.metadata?.reviewGateInternal);
+      const context = users.map(message => ({
+        text: message.text,
+        files: (message.files ?? []).map(({ name, description, source }) => ({
+          name: name ?? "attachment", ...(description ? { description } : {}),
+          ...(source ? { source } : {}),
+        })),
+        skills: skills(message.skills),
+      }));
+      if (this.run) {
+        this.run.stopFailures = await this.stopParticipants();
+        await this.save();
+        requireThat(this.run.stopFailures.length === 0,
+          "Cannot start a new run: prior child turns could not be confirmed stopped.");
+        await this.ctx.storage.set(`${this.key}/${this.run.id}`, this.run);
+      }
+      this.run = {
+        version: 1, id: id("run"), root: sessionID, directory: this.directory,
+        location: root.location.directory,
+        requirements: task, context,
+        files: uniqueFiles([...users.flatMap(user => files(user.files)), ...files(attachments.files)]),
+        skills: uniqueSkills([...users.flatMap(user => skills(user.skills)), ...skills(attachments.skills)]),
+        permissions: root.permissions ?? [],
+        phase: "BUILDING", round: 0, maxRounds: this.maxRounds,
+        sessions: Object.fromEntries(["builder", ...reviewers].map(role => [role, id("ses")])),
+        jobs: [], findings: [], reports: {}, history: [], candidate: null,
+        triageRequest: null, triage: null, reportRequest: null, htmlReport: null,
+      };
+      await this.enqueue("builder");
+      await this.save();
+      await this.flush();
+      return this.run;
+    });
+  }
+
+  async tool(name, input, sessionID, signal) {
+    validate(inputs[name], input);
+    if (name === "start") return this.start(sessionID, input.task);
+    // Tool calls can already be queued behind a resume transaction when their
+    // old execution is interrupted. Bind them before acquiring the lock.
+    const admitted = ["candidate", "report"].includes(name)
+      ? (await this.ctx.storage.get(this.key))?.jobs.findLast(job => job.sessionID === sessionID)?.id
+      : null;
+    return this.locked(async () => {
+      requireThat(this.run, "No swarm run exists in this checkout.");
+      const role = await this.authorize(sessionID, name === "candidate" ? ["builder"]
+        : name === "report" ? reviewers : ["triage", "report_html"].includes(name) ? ["orchestrator"]
+        : ["orchestrator", "builder", ...reviewers], name === "status");
+      await this.checkCandidate();
+      if (["candidate", "report"].includes(name)) {
+        requireThat(admitted === this.job(role)?.id, "Stale dispatch: this call belongs to a previous turn.");
+      }
+      if (name === "report_html") {
+        requireThat(["REPORTING", "APPROVED"].includes(this.run.phase),
+          "The run is not accepting an HTML report.");
+      } else if (name === "triage") {
+        requireThat(this.run.phase === "TRIAGING", "The run is not accepting triage.");
+      }
+      const job = this.job(role);
+      if (name !== "status" && job && !job.finished && !job.cancelled &&
+        this.now() >= job.deadline) {
+        await this.block(`${role} submitted after its deadline.`);
+        await this.flush();
+        return this.run;
+      }
+      if (name === "report_html") {
+        await this.renderReport(input, signal);
+      } else if (name === "triage") {
+        const next = structuredClone(this.run);
+        triage(next, input);
+        this.run = next;
+        this.job("orchestrator").done = true;
+        this.job("orchestrator").finished = true;
+        this.run.history.push({ at: this.now(), phase: "TRIAGED", ...input });
+        await this.enqueue("builder");
+      } else if (name === "candidate") {
+        // Mutate a copy: a rejected response must not partially change the ledger.
+        const next = structuredClone(this.run);
+        next.history.push({
+          at: this.now(), candidate: next.candidate, reports: next.reports,
+        });
+        candidate(next, input, await this.fingerprint(this.directory));
+        this.run = next;
+        this.job("builder").done = true;
+        this.run.history.push({ at: this.now(), phase: "HANDOFF", candidate: next.candidate.id });
+      } else if (name === "report") {
+        const next = structuredClone(this.run);
+        report(next, role, input);
+        this.run = next;
+        this.job(role).done = true;
+        if (input.verdict === "blocked") {
+          await this.block(`${role} blocked the candidate: ${input.summary}`);
+        } else if (reviewers.every(reviewer => this.run.reports[reviewer])) {
+          // Do not reuse any child session until its submitted turn ends.
+          // A fast dismissal round could otherwise overtake a prior reviewer.
+          this.run.phase = "REVIEW_HANDOFF";
+        }
+      }
+      await this.save();
+      await this.flush();
+      return this.run;
+    });
+  }
+
+  async control(sessionID, command) {
+    return this.locked(async () => {
+      requireThat(this.run, "No swarm run exists in this checkout.");
+      await this.authorize(sessionID, ["orchestrator"], command === "cancel");
+      if (command === "cancel") {
+        await this.block("Cancelled by the user. No approval was issued.", "CANCELLED");
+      } else if (command === "resume") {
+        requireThat(this.run.phase === "BLOCKED", "Only a blocked run can resume.");
+        const reportResume = this.run.reportRequest && this.approvedReviews() &&
+          this.run.reportRequest.candidate === this.run.candidate.id &&
+          this.run.reportRequest.requirements === this.requirementsDigest() &&
+          (await this.fingerprint(this.directory)).digest === this.run.candidate.digest;
+        requireThat(reportResume || this.run.round < this.run.maxRounds,
+          "Round limit reached. Start a new run explicitly.");
+        this.run.stopFailures = await this.stopParticipants();
+        await this.save();
+        requireThat(this.run.stopFailures.length === 0,
+          "Cannot resume: prior child turns could not be confirmed stopped. Retry after resolving stopFailures.");
+        this.run.reason = null;
+        if (reportResume) {
+          await this.requestReport();
+        } else if (this.run.findings.some(finding => finding.status === "open") ||
+          Object.values(this.run.reports).some(report => report.verdict === "changes_requested")) {
+          await this.requestTriage();
+        } else {
+          this.run.phase = "BUILDING";
+          this.run.reports = {};
+          await this.enqueue("builder");
+        }
+      }
+      await this.checkCandidate();
+      await this.save();
+      await this.flush();
+      return this.run;
+    });
+  }
+
+  async externalPrompt(sessionID, messageID, prompt, metadata) {
+    if (metadata?.reviewGateInternal) return;
+    return this.locked(async () => {
+      if (!this.run || this.run.root !== sessionID || this.run.phase === "CANCELLED") return;
+      const root = await this.ctx.session.get({ sessionID });
+      if (root.agent !== "orchestrator" || root.location.directory !== this.run.location) {
+        if (!terminal(this.run.phase)) await this.block("The primary session left the workflow.");
+        return;
+      }
+      if (this.run.history.some(entry => entry.messageID === messageID)) return;
+      this.run.requirements += `\n\nUser clarification:\n${prompt.text}`;
+      this.run.files = uniqueFiles([...this.run.files, ...files(prompt.files)]);
+      this.run.skills = uniqueSkills([...this.run.skills, ...skills(prompt.skills)]);
+      this.run.history.push({ at: this.now(), messageID, clarification: prompt.text });
+      await this.block("New user input invalidated the candidate. Use /swarm-resume after clarifying requirements.");
+      await this.flush();
+    });
+  }
+
+  async reconcile() {
+    return this.locked(async () => {
+      if (!this.run) return;
+      const root = await this.ctx.session.get({ sessionID: this.run.root });
+      if (!terminal(this.run.phase) && (root.agent !== "orchestrator" ||
+        root.location.directory !== this.run.location)) {
+        await this.block("The orchestrator changed agent or location.");
+      }
+      await this.checkCandidate();
+      await this.flush();
+      if (this.run.phase === "APPROVED" && this.run.htmlReport?.browser?.state === "requested") {
+        this.run.htmlReport.browser = {
+          state: "unknown", error: "Browser launch was interrupted; open the report file manually.",
+        };
+        await this.save();
+      }
+      if (terminal(this.run.phase)) return;
+      const triageJob = this.job("orchestrator");
+      if (["TRIAGING", "REPORTING"].includes(this.run.phase) &&
+        ["triage", "html_report"].includes(triageJob?.kind) &&
+        !triageJob.done && this.now() >= triageJob.deadline) {
+        await this.block(`Orchestrator ${this.run.phase.toLowerCase()} exceeded its deadline.`);
+      }
+      for (const job of this.run.jobs.filter(job =>
+        job.role !== "orchestrator" && !job.finished && !job.cancelled)) {
+        const completion = await this.outcome(job);
+        if (completion && (!Number.isFinite(completion.time?.created) ||
+          completion.time.created >= job.deadline)) {
+          await this.block(`${job.role} completed after its deadline or has unverifiable timing.`);
+          break;
+        }
+        if (!completion && this.now() >= job.deadline) {
+          await this.block(`${job.role} exceeded its deadline.`);
+          break;
+        }
+        const outcome = completion?.outcome;
+        if (outcome === "failed" || outcome === "interrupted") {
+          await this.block(`${job.role} ${outcome}.`);
+          break;
+        }
+        if (outcome === "succeeded") {
+          job.finished = true;
+          job.completionID = completion.id;
+          if (!job.done) {
+            await this.block(`${job.role} stopped without the required structured submission.`);
+            break;
+          }
+        }
+      }
+      if (this.run.phase === "HANDOFF" && this.job("builder").finished) {
+        this.run.phase = "REVIEWING";
+        // Enqueue under the lock without fail-fast sibling operations that
+        // could keep mutating this.run after a context lookup rejects.
+        // flush() still dispatches the persisted reviewer jobs concurrently.
+        for (const reviewer of reviewers) await this.enqueue(reviewer);
+      }
+      if (this.run.phase === "REVIEW_HANDOFF" && reviewers.every(role => this.job(role).finished)) {
+        if (this.approvedReviews()) {
+          await this.checkCandidate();
+          if (this.run.phase === "REVIEW_HANDOFF") {
+            await this.requestReport();
+          }
+        } else if (this.run.round >= this.run.maxRounds) {
+          await this.block("Review round limit reached with outstanding changes.");
+        } else {
+          await this.requestTriage();
+        }
+      }
+      await this.save();
+      await this.flush();
+    });
+  }
+
+  async inspect(sessionID) {
+    // Hooks can run during a locked dispatch or permission assertion. A durable
+    // read avoids re-entering that lock and never observes uncommitted changes.
+    const run = await this.ctx.storage.get(this.key);
+    const role = run && (run.root === sessionID ? "orchestrator"
+      : Object.keys(run.sessions).find(role => run.sessions[role] === sessionID));
+    if (role === "orchestrator") {
+      const session = await this.ctx.session.get({ sessionID });
+      if (session.agent !== "orchestrator" || session.location.directory !== run.location) {
+        return { phase: run.phase };
+      }
+    }
+    return {
+      role, phase: run?.phase,
+      submitted: role ? run.jobs.findLast(job => job.role === role)?.done : false,
+    };
+  }
+
+  async fail(error) {
+    return this.locked(async () => {
+      if (this.run && !terminal(this.run.phase)) {
+        await this.block(`Controller error: ${error.message}`);
+        await this.flush();
+      }
+    });
+  }
+}

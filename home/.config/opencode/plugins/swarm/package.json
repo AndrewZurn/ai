@@ -1,0 +1,7 @@
+{
+  "name": "opencode-swarm",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  }
+}

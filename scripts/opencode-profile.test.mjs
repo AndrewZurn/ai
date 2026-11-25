@@ -98,7 +98,11 @@ test("work setup merges config and appends a closed provider allowlist", t => {
   assert.equal(config.update, "notify");
   assert.equal(config.agents.build.steps, 20);
   assert.match(config.agents.build.model, /^openai\//);
-  assert.equal(config.agents["adversarial-reviewer"].model, "openai/gpt-6-astra#xhigh");
+  const source = JSON.parse(fs.readFileSync(f.profileFile("work"), "utf8")).config;
+  for (const agent of ["build", "plan", "orchestrator", "builder",
+    "adversarial-reviewer", "test-engineer", "specification-reviewer"]) {
+    assert.equal(config.agents[agent].model, source.agents[agent].model);
+  }
   assert.deepEqual(config.watcher.ignore, ["work"]);
   assert.deepEqual(config.policies.slice(-3), [
     { action: "provider.use", resource: "*", effect: "deny" },
@@ -119,6 +123,10 @@ test("personal defaults use Go with local providers, without work settings", t =
   assert.equal(config.model, "opencode-go/glm-5.3");
   assert.equal(config.agents.build.model, "opencode-go/glm-5.3-flash");
   assert.match(config.agents["adversarial-reviewer"].model, /^opencode-go\//);
+  assert.equal(config.agents.builder.model, config.agents.build.model);
+  for (const agent of ["orchestrator", "test-engineer", "specification-reviewer"]) {
+    assert.match(config.agents[agent].model, /^opencode-go\//);
+  }
   assert(config.providers.mlx);
   assert.equal(config.mcp, undefined);
   const result = f.run(["path with spaces", "--flag", "*.ts"], { OPENCODE_PROFILE: "work" });
@@ -294,4 +302,15 @@ test("shared reviewer definition does not fix a provider or change its permissio
   assert.doesNotMatch(reviewer.split("---")[1], /^model:/m);
   assert.match(reviewer, /action: edit\s+resource: "\*"\s+effect: deny/);
   assert.match(reviewer, /action: shell\s+resource: "\*"\s+effect: deny/);
+});
+
+test("swarm agents are model-neutral and every profile requires their models", t => {
+  for (const name of ["orchestrator", "builder", "test-engineer", "specification-reviewer"]) {
+    const agent = fs.readFileSync(path.join(repoRoot,
+      `home/.config/opencode/agents/${name}.md`), "utf8");
+    assert.doesNotMatch(agent.split("---")[1], /^model:/m);
+    const f = fixture(t);
+    f.edit(f.profileFile("work"), profile => { delete profile.config.agents[name]; });
+    assert.match(f.run(["--setup", "work"]).stderr, new RegExp(`Missing model for agents.${name}`));
+  }
 });

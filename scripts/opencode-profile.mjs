@@ -64,7 +64,8 @@ function render(name) {
       allowed.includes(model.split("/")[0]), `${label} must select a model from allowed_providers.`);
   };
   validateModel(config.model, "model");
-  for (const name of ["build", "plan", "adversarial-reviewer"]) {
+  for (const name of ["build", "plan", "orchestrator", "builder",
+    "adversarial-reviewer", "test-engineer", "specification-reviewer"]) {
     assert(object(config.agents?.[name]) && config.agents[name].model,
       `Missing model for agents.${name}`);
   }

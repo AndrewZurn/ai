@@ -140,8 +140,9 @@ tools. `oc2-restart-service` remains an explicit, separate service helper.
    Names use lowercase letters/digits and single hyphens, such as `travel` or
    `work-laptop`. Profile discovery requires no script changes.
 2. Set `description` and a non-empty, unique `allowed_providers` list of exact IDs.
-3. Under `config`, set the root `model` and the models for `build`, `plan`, and
-   `adversarial-reviewer`. Additional agents and commands can set models too.
+3. Under `config`, set the root `model` and the models for `build`, `plan`,
+   `orchestrator`, `builder`, `adversarial-reviewer`, `test-engineer`, and
+   `specification-reviewer`. Additional agents and commands can set models too.
    Every explicit model must use an allowed provider. Confirm IDs and variants
    with `/models`; do not guess them.
 4. Add provider/MCP settings under `config`, and an optional absolute
@@ -159,6 +160,30 @@ For future agents: keep prompts and permissions shared, keep model assignments
 in profiles, and never restore the generated-config symlink in `scripts/links.txt`.
 When adding profile features, update this section and the profile tests.
 
+#### Mandatory review swarm
+
+The opt-in `orchestrator` uses a local server plugin to dispatch a `builder`,
+then three concurrent reviewers. Completion requires explicit approval from
+`adversarial-reviewer`, `test-engineer`, and `specification-reviewer` for the
+same candidate. Only a finding's owner can verify its fix or accept dismissal.
+Findings first return to the orchestrator for mandatory fix/dismiss triage.
+The builder must follow those decisions; proposed dismissals still need the
+owning reviewer's agreement.
+After all three approve, the orchestrator generates a self-contained HTML
+summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
+the browser and records its path in `htmlReport`.
+
+After regenerating your selected profile, start from a Git checkout's canonical
+root and use `/swarm <task and acceptance criteria>`. Use `/swarm-status`,
+`/swarm-resume`, and `/swarm-cancel` to inspect or control the run. New user input
+blocks the run until resumed so changed requirements cannot retain old approvals.
+The default agent remains Plan and ordinary Build behavior is unchanged.
+
+See [the Swarm plugin guide](home/.config/opencode/plugins/swarm/README.md)
+for test-engineer responsibilities, recovery, permissions, and limitations.
+The plugin enforces its approval state; it cannot veto a model's final prose
+reply or block commits/merges outside the workflow.
+
 #### Validate
 
 These tests use temporary homes and require no downloads or provider requests:
@@ -167,6 +192,7 @@ These tests use temporary homes and require no downloads or provider requests:
 node --test scripts/opencode-profile.test.mjs
 bash scripts/test-links.sh
 node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js
+node --test home/.config/opencode/plugins/swarm/test/*.test.js
 ```
 
 ### Import files and directories into home/

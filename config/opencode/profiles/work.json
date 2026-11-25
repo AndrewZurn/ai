@@ -1,25 +1,57 @@
 {
   "description": "OpenAI and GitHub Copilot only",
-  "allowed_providers": ["openai", "github-copilot"],
+  "allowed_providers": [
+    "openai",
+    "github-copilot"
+  ],
   "launcher": {
     "ca_file": "/Library/Application Support/Netskope/STAgent/data/nscacert.pem"
   },
   "config": {
     "model": "openai/gpt-6.1-sol",
     "agents": {
-      "build": { "model": "openai/gpt-6.1-sol#high" },
-      "plan": { "model": "openai/gpt-6.1-sol#high" },
-      "adversarial-reviewer": { "model": "openai/gpt-6-astra#xhigh" }
+      "build": {
+        "model": "openai/gpt-6-luna#max"
+      },
+      "plan": {
+        "model": "openai/gpt-6.1-sol#xhigh"
+      },
+      "orchestrator": {
+        "model": "openai/gpt-6.1-sol#high"
+      },
+      "builder": {
+        "model": "openai/gpt-6.1-luna#max"
+      },
+      "test-engineer": {
+        "model": "openai/gpt-6.1-sol#high"
+      },
+      "specification-reviewer": {
+        "model": "openai/gpt-6.1-sol#high"
+      },
+      "adversarial-reviewer": {
+        "model": "openai/gpt-6-sol#xhigh"
+      }
     },
     "policies": [
-      { "action": "plugin.use", "resource": "*go-usage*", "effect": "deny" }
+      {
+        "action": "plugin.use",
+        "resource": "*go-usage*",
+        "effect": "deny"
+      }
     ],
     "mcp": {
       "servers": {
         "synk": {
           "type": "local",
           "disabled": true,
-          "command": ["npx", "-y", "snyk@latest", "mcp", "-t", "stdio"],
+          "command": [
+            "npx",
+            "-y",
+            "snyk@latest",
+            "mcp",
+            "-t",
+            "stdio"
+          ],
           "environment": {
             "SNYK_TOKEN": "{env:SNYK_TOKEN}",
             "SNYK_CFG_ORG": "{env:SNYK_CFG_ORG}"
@@ -28,7 +60,12 @@
         "lucid": {
           "type": "local",
           "disabled": true,
-          "command": ["npx", "-y", "mcp-remote", "https://mcp.lucid.app/mcp"]
+          "command": [
+            "npx",
+            "-y",
+            "mcp-remote",
+            "https://mcp.lucid.app/mcp"
+          ]
         },
         "datadog": {
           "type": "remote",

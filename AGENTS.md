@@ -31,6 +31,8 @@ Use the scripts below as the primary validation mechanisms.
   - `node --test scripts/opencode-profile.test.mjs`
 - Test the OpenCode Go usage plugin with Node's built-in runner:
   - `node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js`
+- Test the mandatory swarm plugin without providers or downloads:
+  - `node --test home/.config/opencode/plugins/swarm/test/*.test.js`
 
 ### Single-Test Equivalents
 
