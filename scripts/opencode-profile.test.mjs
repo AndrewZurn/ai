@@ -112,7 +112,10 @@ test("work setup merges config and appends a closed provider allowlist", t => {
   assert(config.policies.some(rule => rule.action === "plugin.use" && rule.effect === "deny" &&
     rule.resource === "*go-usage*"));
   assert.equal(config.providers, undefined);
-  assert(Object.values(config.mcp.servers).every(server => server.disabled));
+  assert.deepEqual(Object.keys(config.mcp.servers).sort(), ["datadog", "lucid", "playwright", "synk"]);
+  for (const name of ["synk", "lucid", "datadog"]) {
+    assert.equal(config.mcp.servers[name].disabled, true);
+  }
   assert.equal(fs.statSync(path.join(f.configDir, "opencode.jsonc")).mode & 0o777, 0o600);
 });
 
@@ -128,13 +131,25 @@ test("personal defaults use Go with local providers, without work settings", t =
     assert.match(config.agents[agent].model, /^opencode-go\//);
   }
   assert(config.providers.mlx);
-  assert.equal(config.mcp, undefined);
+  assert.deepEqual(Object.keys(config.mcp.servers), ["playwright"]);
   const result = f.run(["path with spaces", "--flag", "*.ts"], { OPENCODE_PROFILE: "work" });
   assert.equal(result.status, 17);
   assert.deepEqual(JSON.parse(result.stdout), {
     args: ["path with spaces", "--flag", "*.ts"], ca: null,
   });
 });
+
+for (const profile of ["personal", "work"]) {
+  test(`${profile} enables the shared Playwright MCP server`, t => {
+    const f = fixture(t);
+    success(f.run(["--setup", profile]));
+    assert.deepEqual(f.config().mcp.servers.playwright, {
+      type: "local",
+      command: ["npx", "-y", "@playwright/mcp@latest"],
+      disabled: false,
+    });
+  });
+}
 
 test("environment selects setup only; conflicting inputs fail", t => {
   const f = fixture(t);

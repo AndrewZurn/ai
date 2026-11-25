@@ -106,7 +106,14 @@ entitlements, live model availability, or the complete OpenCode schema.
 | `personal` | Current Go build/plan models; Go reviewer | `opencode-go`, `mlx`, `local-llama`, `ollama`, `lmstudio`, `vllm` |
 | `work` | OpenAI build/plan; existing OpenAI reviewer | `openai`, `github-copilot` |
 
-Work keeps the optional MCP servers disabled and blocks the Go usage plugin.
+Both profiles enable the local [Playwright MCP](https://github.com/microsoft/playwright-mcp)
+server through `npx -y @playwright/mcp@latest`. OpenCode starts it automatically
+after the selected profile is regenerated with `oc2 --setup <name>`. This can
+download the package on first use; setup itself does not install or start it.
+Playwright uses a separate persistent browser profile, not your regular browser
+session. Use `/mcps` to check its connection.
+
+Work keeps the Snyk (`synk`), Lucid, and Datadog MCP servers disabled and blocks the Go usage plugin.
 Copilot is allowed, but no Copilot model ID is assumed: connect the account, check
 `/models`, then update the work profile if it should be the default.
 Personal retains the local provider settings. Existing sessions can retain their
