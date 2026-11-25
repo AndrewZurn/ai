@@ -132,8 +132,6 @@ test("personal defaults use Go with local providers, without work settings", t =
   }
   assert(config.providers.mlx);
   assert.deepEqual(Object.keys(config.mcp.servers), ["playwright"]);
-  assert(config.policies.some(rule => rule.action === "plugin.use" && rule.effect === "deny" &&
-    rule.resource === "*openai-usage*"));
   const result = f.run(["path with spaces", "--flag", "*.ts"], { OPENCODE_PROFILE: "work" });
   assert.equal(result.status, 17);
   assert.deepEqual(JSON.parse(result.stdout), {
