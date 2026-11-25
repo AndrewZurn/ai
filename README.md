@@ -113,7 +113,7 @@ download the package on first use; setup itself does not install or start it.
 Playwright uses a separate persistent browser profile, not your regular browser
 session. Use `/mcps` to check its connection.
 
-Work keeps the Snyk (`synk`), Lucid, and Datadog MCP servers disabled and blocks the Go usage plugin.
+Work keeps the Snyk (`synk`), Lucid, and Datadog MCP servers disabled and blocks the Go usage plugin; personal blocks the OpenAI usage plugin.
 Copilot is allowed, but no Copilot model ID is assumed: connect the account, check
 `/models`, then update the work profile if it should be the default.
 Personal retains the local provider settings. Existing sessions can retain their
@@ -212,6 +212,7 @@ These tests use temporary homes and require no downloads or provider requests:
 node --test scripts/opencode-profile.test.mjs
 bash scripts/test-links.sh
 node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js
+node --test home/.config/opencode/plugins/openai-usage/test/usage-core.test.js
 node --test home/.config/opencode/plugins/swarm/test/*.test.js
 ```
 

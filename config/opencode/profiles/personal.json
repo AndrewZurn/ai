@@ -36,6 +36,13 @@
         "model": "opencode-go/glm-5.3"
       }
     },
+    "policies": [
+      {
+        "action": "plugin.use",
+        "resource": "*openai-usage*",
+        "effect": "deny"
+      }
+    ],
     "providers": {
       "mlx": {
         "package": "aisdk:@ai-sdk/openai-compatible",

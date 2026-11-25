@@ -1,0 +1,8 @@
+{
+  "name": "opencode-openai-usage",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx"
+  }
+}
