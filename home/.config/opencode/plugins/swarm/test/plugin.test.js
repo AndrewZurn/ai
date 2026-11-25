@@ -31,7 +31,7 @@ test("standard instructions include reusable workflow policy without seeded-eval
     /final response must link htmlReport\.path.*candidate ID, review rounds, test evidence.*limitations/,
     /Do not claim checks that were not run/,
     /use \/swarm-status rather than a conversational status question/,
-    /New ordinary messages.*invalidate current approvals.*block the workflow/,
+    /After implementation starts, new ordinary messages.*invalidate current approvals.*block the workflow/,
     /\/swarm-resume after clarification/,
     /Wait for plugin notifications rather than polling/,
   ]) assert.match(orchestratorInstructions, requirement);
@@ -49,6 +49,7 @@ async function scriptedRun(t, uiChanges) {
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   execFileSync("git", ["init", "-q"], { cwd: directory });
   await fs.writeFile(path.join(directory, "code.js"), "candidate\n");
+  await fs.writeFile(path.join(directory, "PLAN.md"), "Implement the task and add guard regression tests.\n");
   const state = new Map();
   const tools = new Map();
   const commands = new Map();
@@ -130,7 +131,7 @@ async function scriptedRun(t, uiChanges) {
   const configure = () => setup(ctx, { openReport: async file => { openedReports.push(file); } });
   const cleanup = await configure();
   t.after(cleanup);
-  assert.equal(tools.size, 6);
+  assert.equal(tools.size, 7);
   assert.deepEqual([...commands.keys()], ["swarm", "swarm-status", "swarm-resume", "swarm-cancel"]);
   assert.equal(agents.get("builder").system, undefined);
   assert.equal(agents.get("builder").model, "profile-specific");
@@ -144,7 +145,7 @@ async function scriptedRun(t, uiChanges) {
   assert.equal(sessions.get("ses_root").agent, "build");
   assert.equal(synthetics.length, 0);
   await commands.get("swarm").execute({
-    sessionID: "ses_root", prompt: { text: "Implement the task", files: [], skills: [] },
+    sessionID: "ses_root", prompt: { text: "--plan PLAN.md Implement the task", files: [], skills: [] },
   });
   const active = () => [...state.entries()].find(([key]) => key.endsWith("/active"))[1];
   const invoke = async (name, input, sessionID) => JSON.parse((await tools.get(`swarm_${name}`)
@@ -183,10 +184,10 @@ async function scriptedRun(t, uiChanges) {
   };
   const run = active();
   assert.equal(run.requirements, "Implement the task", "policy must not alter task requirements");
-  assert.equal(run.phase, "BUILDING", "instructions must not invalidate the new run");
+  assert.equal(run.phase, "PLAN_REVIEW", "builder must wait for plan review");
   assert.equal(synthetics.length, 1);
   assert.equal(synthetics[0].sessionID, "ses_root");
-  assert.match(synthetics[0].text, /While the run is active, \/swarm-status/);
+  assert.match(synthetics[0].text, /\/swarm-status checks progress/);
   assert.match(synthetics[0].text, /ordinary messages pause the workflow/);
   assert.match(synthetics[0].text, /\/swarm-resume.*\/swarm-cancel/);
   assert(!synthetics[0].text.includes(orchestratorInstructions),
@@ -196,12 +197,22 @@ async function scriptedRun(t, uiChanges) {
   assert(initialContext.system.some(part => part.text === orchestratorInstructions),
     "the command-selected orchestrator receives the full workflow instructions");
   await assert.rejects(commands.get("swarm").execute({
-    sessionID: "ses_root", prompt: { text: "Attempt duplicate enrollment" },
+    sessionID: "ses_root", prompt: { text: "--plan PLAN.md Attempt duplicate enrollment" },
   }), /already has an active run/);
   assert.equal(synthetics.length, 1, "failed enrollment does not emit another startup message");
   assert.equal(active().requirements, run.requirements);
+  assert.equal(prompts.length, 1, "only the orchestrator receives the plan at enrollment");
+  assert.equal(prompts[0].sessionID, "ses_root");
+  assert.match(prompts[0].text, /Implement the task and add guard regression tests/);
+  await invoke("plan", {
+    request: active().planReview.request, decision: "ready",
+    summary: "The provided plan defines the implementation and regression checks.",
+    questions: [], answers: [],
+  }, "ses_root");
+  assert.equal(await fs.readFile(path.join(directory, "PLAN.md"), "utf8"),
+    "Implement the task and add guard regression tests.\n", "plan review leaves the supplied file unchanged");
   const builder = run.sessions.builder;
-  assert.equal(prompts.length, 1);
+  assert.equal(prompts.length, 2);
   assert.equal(sessions.get("ses_root").agent, "orchestrator");
   const denied = { sessionID: builder, action: "edit", effect: "allow" };
   await hooks.get("permission:evaluate")(denied);

@@ -2,6 +2,7 @@ import { SwarmController } from "./controller.js"
 import { inputs, requiredReviewers } from "./protocol.js"
 import { repository } from "./snapshot.js"
 import { orchestratorInstructions } from "./instructions.js"
+import { planCommand } from "./plan.js"
 
 function readOnlyGit(command) {
   if (!/^[A-Za-z0-9_./:@^~+= -]+$/.test(command)) return false
@@ -62,7 +63,8 @@ export async function setup(ctx, dependencies = {}) {
         editor.add({
           name: `swarm_${name}`,
           description: {
-            start: "Start the builder and required reviewers, including UI design review when UI changes.",
+            start: "Enroll a required plan file for orchestrator review before any builder dispatch.",
+            plan: "Orchestrator only: record plan review, targeted questions and user answers; release the builder only when the plan is clear.",
             status: "Read authoritative swarm state and recheck candidate contents.",
             triage: "Orchestrator only: classify every open finding as fix or propose dismissal, with reasons.",
             candidate: "Builder only: submit a candidate and a response to every open finding, then stop.",
@@ -84,12 +86,12 @@ export async function setup(ctx, dependencies = {}) {
         name: "swarm",
         description: "Build a task and require all baseline reviewers plus UI design review for UI changes",
         execute: async ({ sessionID, prompt }) => {
-          if (!prompt.text.trim()) throw new Error("Usage: /swarm <task and acceptance criteria>")
+          const input = planCommand(prompt.text)
           await ctx.session.switchAgent({ sessionID, agent: "orchestrator" })
-          await gate.start(sessionID, prompt.text, prompt)
+          await gate.start(sessionID, input.task, prompt, input.plan)
           await ctx.session.synthetic({
             sessionID,
-            text: "Swarm task enrolled. For this run, the plugin manages implementation and required reviews, then saves the HTML summary in <repository-root>/.swarms/ and attempts to open it in the browser. While the run is active, /swarm-status checks progress without changing requirements; ordinary messages pause the workflow as requirement changes. /swarm-resume continues after clarification; /swarm-cancel stops the run.",
+            text: "Swarm plan enrolled for orchestrator review; implementation has not started. Answer any targeted clarification questions; the builder starts when the plan is clear. /swarm-status checks progress. After implementation starts, ordinary messages pause the workflow as requirement changes and /swarm-resume continues after clarification. /swarm-cancel stops the run. Successful completion saves the HTML summary in <repository-root>/.swarms/ and attempts to open it in the browser.",
           })
         },
       })

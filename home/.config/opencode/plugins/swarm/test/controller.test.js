@@ -19,6 +19,7 @@ export function fixture(options = {}) {
   ]]]);
   let clock = 1000;
   let digest = "contents-a";
+  let planContent = "Implement the feature, preserve compatibility, and add regression tests.";
   const ctx = {
     storage: {
       get: async key => structuredClone(data.get(key)),
@@ -61,6 +62,10 @@ export function fixture(options = {}) {
   };
   const dependencies = {
     snapshot: async () => ({ digest, files: ["code.js", "untracked.test.js"] }),
+    readPlan: async (directory, reference, authorize) => {
+      await authorize("/repo/PLAN.md");
+      return { path: "/repo/PLAN.md", content: planContent, sha256: planContent };
+    },
     writeReport: async (run, narrative) => {
       writtenReports.push({ run, narrative });
       return {
@@ -74,9 +79,15 @@ export function fixture(options = {}) {
   };
   let gate = new SwarmController(ctx, "/repo", dependencies);
   const state = () => structuredClone(data.get(gate.key));
+  const approvePlan = async () => {
+    if (state()?.phase === "PLAN_REVIEW" && options.autoPlan !== false) {
+      await gate.tool("plan", planInput({ state }), "ses_root");
+    }
+  };
   const tool = async (name, input, role = "orchestrator") => {
     const result = await gate.tool(name, input,
       role === "orchestrator" ? "ses_root" : state().sessions[role]);
+    if (name === "start") await approvePlan();
     if (name === "report" && options.autoFinish !== false &&
       !["BLOCKED", "CANCELLED"].includes(state().phase)) await finish(role);
     return result;
@@ -94,12 +105,17 @@ export function fixture(options = {}) {
     }
   };
   return {
-    ctx, data, sessions, deliveries, messages, writtenReports, openedReports, state, tool, finish,
+    ctx, data, sessions, deliveries, messages, writtenReports, openedReports, state, tool, finish, approvePlan,
     get gate() { return gate; },
     change: () => { digest = "contents-b"; },
+    changePlan: () => { planContent = "Revised plan: validate all inputs and add regression tests."; },
     advance: duration => { clock += duration; },
     restart: () => { gate = new SwarmController(ctx, "/repo", dependencies); return gate; },
-    start: () => gate.start("ses_root", "Implement the feature"),
+    start: async () => {
+      await gate.start("ses_root", "Implement the feature", {}, "PLAN.md");
+      await approvePlan();
+      return state();
+    },
   };
 }
 
@@ -123,6 +139,147 @@ export const htmlInput = f => ({
   summary: "Implemented and independently reviewed the requested task.",
   limitations: "Finite testing does not prove the absence of defects.",
 });
+export const planInput = (f, overrides = {}) => ({
+  request: f.state().planReview.request, decision: "ready",
+  summary: "Read the complete plan: scope, acceptance criteria and verification are clear.",
+  questions: [], answers: [], ...overrides,
+});
+
+test("a required plan is reviewed before any builder exists and only the orchestrator may release it", async () => {
+  const f = fixture({ autoPlan: false });
+  await assert.rejects(f.gate.tool("start", { task: "No plan" }, "ses_root"), /missing plan/);
+  assert.equal(f.state(), undefined);
+  await f.start();
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+  assert.equal(f.state().round, 0);
+  assert.equal(f.sessions.size, 1);
+  assert.equal(f.deliveries.size, 1);
+  assert.equal([...f.deliveries.values()][0].sessionID, "ses_root");
+  assert.match([...f.deliveries.values()][0].text, /preserve compatibility/);
+  assert.match([...f.deliveries.values()][0].text, /specific questions/);
+  await assert.rejects(f.gate.tool("plan", planInput(f), "ses_stranger"), /cannot perform/);
+  const builder = f.state().sessions.builder;
+  f.sessions.set(builder, {
+    agent: "builder", parentID: "ses_root", location: { directory: "/repo" }, time: {},
+  });
+  await assert.rejects(f.tool("plan", planInput(f), "builder"), /cannot perform/);
+  await assert.rejects(f.tool("candidate", candidateInput(), "builder"), /Stale dispatch/);
+  await assert.rejects(f.tool("plan", planInput(f, { request: "stale" })), /Stale plan/);
+  await f.tool("plan", planInput(f));
+  assert.equal(f.state().phase, "BUILDING");
+  assert.equal(f.state().jobs.filter(job => job.role === "builder").length, 1);
+  await assert.rejects(f.tool("plan", planInput(f)), /not accepting/);
+});
+
+test("targeted plan questions wait across restart and require all real answers before building", async () => {
+  const f = fixture({ autoPlan: false });
+  await f.start();
+  const first = planInput(f, {
+    decision: "clarify", questions: ["What is the maximum input size?", "Which error code is required?"],
+    summary: "Two acceptance criteria are missing.",
+  });
+  await f.tool("plan", first);
+  assert.equal(f.state().phase, "CLARIFYING");
+  assert.equal(f.sessions.size, 1);
+  await assert.rejects(f.tool("plan", first), /Stale plan/);
+  f.advance(24 * 60 * 60 * 1000);
+  await f.restart().reconcile();
+  assert.equal(f.state().phase, "CLARIFYING", "human answers have no dispatch deadline");
+  const answers = [
+    { question: first.questions[0], answer: "One MiB." },
+    { question: first.questions[1], answer: "INVALID_INPUT." },
+  ];
+  const before = f.state();
+  for (const invalid of [[], answers.slice(0, 1), [answers[0], answers[0]],
+    [{ question: "Unasked question", answer: "Invented" }, answers[1]]]) {
+    await assert.rejects(f.tool("plan", planInput(f, { answers: invalid })), /every pending/);
+    assert.deepEqual(f.state(), before);
+  }
+  await f.tool("plan", planInput(f, { answers }));
+  assert.equal(f.state().phase, "BUILDING");
+  assert.deepEqual(f.state().planReview.answers, answers);
+  assert.match([...f.deliveries.values()].at(-1).text, /INVALID_INPUT/);
+  assert.equal(f.state().round, 0);
+});
+
+test("ordinary clarification replies refresh plan review without blocking or requiring resume", async () => {
+  const f = fixture({ autoPlan: false });
+  await f.start();
+  await f.tool("plan", planInput(f, {
+    decision: "clarify", questions: ["How should empty input behave?"],
+  }));
+  const old = planInput(f);
+  const deliveries = f.deliveries.size;
+  await f.gate.externalPrompt("ses_root", "msg_plan_answer", { text: "Return an empty result." });
+  await f.gate.externalPrompt("ses_root", "msg_plan_answer", { text: "Return an empty result." });
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+  assert.equal(f.deliveries.size, deliveries, "user admission must not dispatch another root prompt");
+  assert.equal(f.state().requirements.match(/Return an empty result/g).length, 1);
+  await assert.rejects(f.tool("plan", old), /Stale plan/);
+  await f.tool("plan", planInput(f, {
+    answers: [{ question: "How should empty input behave?", answer: "Return an empty result." }],
+  }));
+  assert.equal(f.state().phase, "BUILDING");
+});
+
+test("further plan clarification rounds retain prior answers and rotate the request", async () => {
+  const f = fixture({ autoPlan: false });
+  await f.start();
+  await f.tool("plan", planInput(f, { decision: "clarify", questions: ["What is the input limit?"] }));
+  const previous = planInput(f, {
+    decision: "clarify", questions: ["Which error code applies above that limit?"],
+    answers: [{ question: "What is the input limit?", answer: "One MiB." }],
+  });
+  await f.tool("plan", previous);
+  await assert.rejects(f.tool("plan", previous), /Stale plan/);
+  assert.equal(f.sessions.size, 1);
+  await f.tool("plan", planInput(f, {
+    answers: [{ question: previous.questions[0], answer: "INVALID_INPUT." }],
+  }));
+  assert.equal(f.state().planReview.answers.length, 2);
+  assert.equal(f.state().history.filter(entry => entry.phase === "PLAN_REVIEWED").length, 3);
+  assert.equal(f.state().jobs.filter(job => job.role === "builder").length, 1);
+});
+
+test("changed plans revoke preflight requests and later approvals, including external plan contents", async () => {
+  const f = fixture({ autoPlan: false });
+  await f.start();
+  const old = planInput(f);
+  f.changePlan();
+  await f.tool("status", {});
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+  assert.notEqual(f.state().planReview.request, old.request);
+  await assert.rejects(f.tool("plan", old), /Stale plan/);
+  await f.tool("plan", planInput(f));
+  const g = fixture();
+  await reviewReady(g);
+  for (const role of reviewers) await g.tool("report", reportInput(g), role);
+  assert.equal(g.state().phase, "APPROVED");
+  g.changePlan();
+  await g.tool("status", {});
+  assert.equal(g.state().phase, "BLOCKED");
+  assert.match(g.state().reason, /plan changed/);
+  await g.gate.control("ses_root", "resume");
+  assert.equal(g.state().phase, "PLAN_REVIEW");
+});
+
+test("missing and unreadable plans fail closed; a preflight deadline can resume without code rounds", async () => {
+  const missing = fixture({ readPlan: async () => { throw new Error("plan missing"); } });
+  await assert.rejects(missing.start(), /plan missing/);
+  assert.equal(missing.deliveries.size, 0);
+  const f = fixture({ autoPlan: false, maxRounds: 1 });
+  await f.start();
+  const old = planInput(f);
+  f.advance(31 * 60 * 1000);
+  await f.tool("plan", old);
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.equal(f.state().round, 0);
+  await f.gate.control("ses_root", "resume");
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+  await assert.rejects(f.tool("plan", old), /Stale plan/);
+  await f.tool("plan", planInput(f));
+  assert.equal(f.state().phase, "BUILDING");
+});
 const finding = {
   id: "empty-input", severity: "major", kind: "defect", location: "code.js:12",
   description: "Empty input crashes", expected: "Return an empty result",
@@ -141,10 +298,10 @@ export async function reviewReady(f) {
 test("builder completes before parallel review dispatch; all three approvals are required", async () => {
   const f = fixture();
   await reviewReady(f);
-  assert.equal(f.deliveries.size, 4);
+  assert.equal(f.deliveries.size, 5);
   const builder = f.sessions.get(f.state().sessions.builder);
   assert.deepEqual(builder.permissions, f.sessions.get("ses_root").permissions);
-  const prompt = [...f.deliveries.values()][0].text;
+  const prompt = [...f.deliveries.values()].find(item => item.sessionID === builder.id).text;
   assert.match(prompt, /Original requirement/);
   assert.doesNotMatch(prompt, /biased builder summary/);
   await f.tool("report", reportInput(f), reviewers[0]);
@@ -180,7 +337,7 @@ for (const changes of ["web", "non-web"]) {
     assert.deepEqual(f.state().candidate.ui, ui);
     assert.deepEqual(requiredReviewers(f.state()), [...reviewers, uiReviewer]);
     await f.finish("builder");
-    assert.equal(f.deliveries.size, 4);
+    assert.equal(f.deliveries.size, 5);
     assert(!f.sessions.has(f.state().sessions[uiReviewer]), "UI reviewer not launched yet");
     for (const role of reviewers) await f.tool("report", reportInput(f), role);
     assert.equal(f.state().phase, "REVIEWING", "three approvals cannot complete UI review");
@@ -403,7 +560,7 @@ test("content changes revoke pending and already issued approvals", async () => 
     const result = await f.tool("status", {});
     assert.equal(result.phase, "BLOCKED");
     assert.match(result.reason, /contents changed/);
-    await assert.rejects(f.tool("report", reportInput(f), reviewers[1]), /not accepting/);
+    await assert.rejects(f.tool("report", reportInput(f), reviewers[1]), /Stale dispatch/);
   }
 });
 
@@ -420,7 +577,7 @@ test("restart recovers handoff and never duplicates review dispatch", async () =
   await f.restart().reconcile();
   assert.equal(f.state().phase, "REVIEWING");
   await f.gate.reconcile();
-  assert.equal(f.deliveries.size, 4);
+  assert.equal(f.deliveries.size, 5);
   await Promise.all(reviewers.map(role => f.tool("report", reportInput(f), role)));
   assert.equal(f.state().phase, "APPROVED");
 });
@@ -496,6 +653,7 @@ test("new user requirements revoke approvals, deduplicate retries, and survive r
   assert.equal(f.state().phase, "BLOCKED");
   assert.equal(f.state().requirements.match(/Also support empty inputs/g).length, 1);
   await f.gate.control("ses_root", "resume");
+  await f.approvePlan();
   assert.equal(f.state().phase, "BUILDING");
   assert.match([...f.deliveries.values()].at(-1).text, /Also support empty inputs/);
   await f.gate.control("ses_root", "cancel");
@@ -538,12 +696,15 @@ test("tool enrollment forwards stored attachments and skills natively without me
       name: "spec.png", mention: { start: 4, end: 8 } }],
     skills: [{ id: "test-skill", name: "Test skill", mention: { start: 1, end: 3 } }],
   });
-  await f.tool("start", { task: "Implement the attached screenshot" });
-  const builderPrompt = [...f.deliveries.values()][0];
+  await f.tool("start", { task: "Implement the attached screenshot", plan: "PLAN.md" });
+  const builderPrompt = [...f.deliveries.values()].find(item => item.sessionID === f.state().sessions.builder);
+  const planPrompt = [...f.deliveries.values()].find(item => item.sessionID === "ses_root");
   assert.deepEqual(builderPrompt.files, [{
     uri: "data:image/png;base64,c2NyZWVuc2hvdA==", name: "spec.png",
   }]);
   assert.deepEqual(builderPrompt.skills, [{ id: "test-skill" }]);
+  assert.deepEqual(planPrompt.files, builderPrompt.files, "the orchestrator receives the plan's supporting attachments");
+  assert.deepEqual(planPrompt.skills, builderPrompt.skills);
   assert.doesNotMatch(builderPrompt.text, /c2NyZWVuc2hvdA==/);
   await f.tool("candidate", candidateInput(), "builder");
   await f.finish("builder");
@@ -561,8 +722,9 @@ test("command attachments combine with older conversation attachments without st
   await f.gate.start("ses_root", "Implement both documents", {
     files: [{ uri: "data:image/png;base64,bmV3", mention: { start: 0, end: 3 } }],
     skills: [{ id: "extra-skill", mention: { start: 0, end: 3 } }],
-  });
-  const prompt = [...f.deliveries.values()][0];
+  }, "PLAN.md");
+  await f.approvePlan();
+  const prompt = [...f.deliveries.values()].find(item => item.sessionID === f.state().sessions.builder);
   assert.equal(prompt.files.length, 2);
   assert(prompt.files.every(file => !Object.hasOwn(file, "mention")));
   assert.deepEqual(prompt.skills, [{ id: "extra-skill" }]);
@@ -656,7 +818,7 @@ test("failed reporting notifications are not retried into ordinary Build", async
   f.sessions.get("ses_root").agent = "build";
   f.ctx.session.prompt = original;
   await f.restart().reconcile();
-  assert(![...f.deliveries.values()].some(prompt => prompt.sessionID === "ses_root"));
+  assert.equal([...f.deliveries.values()].filter(prompt => prompt.sessionID === "ses_root").length, 1);
   assert(f.state().jobs.findLast(job => job.role === "orchestrator").cancelled);
 });
 
@@ -732,7 +894,7 @@ test("only the orchestrator can triage; incomplete, duplicate, stale and forged 
   }
   assert.equal([...f.deliveries.values()].filter(prompt =>
     prompt.sessionID === f.state().sessions.builder).length, 1);
-  const notification = [...f.deliveries.values()].find(prompt => prompt.sessionID === "ses_root");
+  const notification = [...f.deliveries.values()].findLast(prompt => prompt.sessionID === "ses_root");
   assert.match(notification.text, /Triage every open finding/);
   assert.match(notification.text, /empty-input/);
   assert.match(notification.text, new RegExp(f.state().triageRequest.id));
@@ -816,11 +978,12 @@ test("triage is re-requested on resume with a new token and a current content ba
   await f.gate.externalPrompt("ses_root", "msg_triage_clarification", { text: "Preserve the legacy boundary" });
   f.change();
   await f.gate.control("ses_root", "resume");
+  await f.approvePlan();
   assert.equal(f.state().phase, "TRIAGING");
   assert.notEqual(f.state().triageRequest.id, stale.request);
   assert.equal(f.state().triageRequest.digest, "contents-b");
   await assert.rejects(f.tool("triage", stale), /Stale/);
-  await assert.rejects(f.tool("candidate", candidateInput(), "builder"), /only be submitted while BUILDING/);
+  await assert.rejects(f.tool("candidate", candidateInput(), "builder"), /Stale dispatch/);
   const current = triageInput(f);
   await f.tool("triage", current);
   const findingID = f.state().findings[0].id;
@@ -866,6 +1029,7 @@ test("general changes-requested feedback still requires triage even without open
   assert.equal(f.state().phase, "TRIAGING");
   await f.gate.externalPrompt("ses_root", "msg_general_clarification", { text: "Keep the same behavior" });
   await f.gate.control("ses_root", "resume");
+  await f.approvePlan();
   assert.equal(f.state().phase, "TRIAGING", "resume must not bypass general-feedback triage");
   await f.tool("triage", triageInput(f, [], "Document the verification limits; do not change behavior"));
   assert.equal(f.state().phase, "BUILDING");
@@ -883,11 +1047,12 @@ test("failed interruption keeps the old builder blocked until resume confirms it
   await assert.rejects(f.gate.control("ses_root", "resume"), /could not be confirmed stopped/);
   await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
   assert.equal(f.state().phase, "BLOCKED");
-  await assert.rejects(f.tool("candidate", candidateInput(), "builder"), /only be submitted while BUILDING/);
+  await assert.rejects(f.tool("candidate", candidateInput(), "builder"), /Stale dispatch/);
   assert.equal(f.state().candidate, null);
   assert.equal(f.state().jobs.filter(job => job.role === "builder").length, 1);
   f.ctx.session.interrupt = interrupt;
   await f.gate.control("ses_root", "resume");
+  await f.approvePlan();
   assert.equal(f.state().phase, "BUILDING");
   assert.deepEqual(f.state().stopFailures, []);
   assert.match([...f.deliveries.values()].at(-1).text, /Use the clarified behavior/);
@@ -924,6 +1089,7 @@ test("an old candidate call queued behind resume cannot submit into the new disp
   release();
   await resuming;
   await assert.rejects(stale, /Stale dispatch/);
+  await f.approvePlan();
   assert.equal(f.state().phase, "BUILDING");
   assert.equal(f.state().candidate, null);
   assert.equal(f.state().jobs.filter(job => job.role === "builder").length, 2);
@@ -1101,6 +1267,7 @@ test("new requirements during reporting cannot reuse the previous review approva
   await reportingReady(f);
   await f.gate.externalPrompt("ses_root", "msg_report_clarification", { text: "Also implement validation" });
   await f.gate.control("ses_root", "resume");
+  await f.approvePlan();
   assert.equal(f.state().phase, "BUILDING");
   assert.deepEqual(f.state().reports, {});
   assert.equal(f.writtenReports.length, 0);

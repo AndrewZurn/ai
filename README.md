@@ -186,9 +186,13 @@ summary in `<repository-root>/.swarms/`. The plugin automatically opens it in
 the browser and records its path in `htmlReport`.
 
 After regenerating your selected profile, start from a Git checkout's canonical
-root and use `/swarm <task and acceptance criteria>`. Use `/swarm-status`,
-`/swarm-resume`, and `/swarm-cancel` to inspect or control the run. New user input
-blocks the run until resumed so changed requirements cannot retain old approvals.
+root and use `/swarm --plan docs/plan.md [task and acceptance criteria]`.
+The plan file is required. The orchestrator reviews it and asks targeted
+questions before any builder starts. Answers are recorded without editing the
+plan; implementation starts automatically once the plan is clear.
+Use `/swarm-status`, `/swarm-resume`, and `/swarm-cancel` to inspect or control
+the run. After implementation starts, new user input blocks the run until
+resumed so changed requirements cannot retain old approvals.
 The default agent remains Plan and ordinary Build behavior is unchanged.
 
 See [the Swarm plugin guide](home/.config/opencode/plugins/swarm/README.md)

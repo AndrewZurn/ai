@@ -94,11 +94,17 @@ test("all model/reviewer text is escaped rather than executable HTML", () => {
   run.findings[0].decisions[0].triage.reason = payload;
   run.reports["test-engineer"].evidence = payload;
   run.history[0].decisions[0].reason = payload;
+  run.plan = { path: payload, sha256: payload, content: payload };
+  run.history.push({
+    phase: "PLAN_REVIEWED", decision: "ready", summary: payload,
+    questions: [payload], answers: [{ question: payload, answer: payload }],
+  });
   const html = renderReport(run, narrative);
   assert(!html.includes(payload));
   assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)/);
   assert.match(html, /&amp; &#39;quoted&#39;/);
   assert.doesNotMatch(html, /<script|<img/i);
+  assert.match(html, /Plan review and clarifications/);
 });
 
 test("HTML refuses missing, mismatched or incomplete approvals", () => {

@@ -101,6 +101,15 @@ ${section("Findings, fixes, and owner verification", findings)}
 ${section("Final implementation and test evidence", pre(run.candidate.summary) + pre(run.candidate.evidence) + pre(run.candidate.ui?.evidence))}
 ${section("Earlier review rounds", rounds || "<p>This candidate passed on its first review round.</p>")}
 ${section("Task and requirements", details("Original task", pre(run.requirements)))}
+${run.plan ? section("Plan review and clarifications",
+    fields([["Plan file", run.plan.path], ["Plan SHA-256", run.plan.sha256]]) +
+    details("Referenced plan", pre(run.plan.content)) +
+    run.history.filter(entry => entry.phase === "PLAN_REVIEWED").map(entry =>
+      `<article><h3>${escape(entry.decision)}</h3>${pre(entry.summary)}${
+        (entry.questions ?? []).map(question => pre(question)).join("")}${
+        (entry.answers ?? []).map(answer => fields([
+          ["Question", answer.question], ["Answer", answer.answer],
+        ])).join("")}</article>`).join("")) : ""}
 ${section("Limitations", pre(narrative.limitations) + "<p>This is a point-in-time record for the candidate above, not a live approval indicator. Later code or requirement changes can invalidate workflow approval. Review and finite testing do not prove the absence of defects. Evidence is reported by the named agents, not independently certified by this renderer.</p>")}
 </main>
 </body>

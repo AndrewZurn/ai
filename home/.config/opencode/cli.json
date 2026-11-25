@@ -26,5 +26,6 @@
   "tabs": {
     "layout": "vertical",
     "mode": "on"
-  }
+  },
+  "plugins": ["./herdr-opencode"]
 }

@@ -54,26 +54,50 @@ Start OpenCode at the **canonical root of the Git checkout** to avoid competing
 location-scoped controllers:
 
 ```text
-/swarm Implement <task>. Acceptance criteria: <criteria>.
+/swarm --plan docs/plan.md Implement <task>. Acceptance criteria: <criteria>.
 ```
 
 The command selects `orchestrator` for that session, captures the original user
-conversation and command attachments, persists the task, and starts the builder.
+conversation and command attachments, persists the task and complete plan text,
+and dispatches the orchestrator for plan review. The plan path is required,
+relative to the repository root or absolute; quote paths containing spaces.
+The plan must be a readable nonempty text file no larger than 1 MiB. Plan reads
+respect the orchestrator's read permissions. Optional task details default to
+"Implement the referenced plan."
 It also supplies standard orchestrator system instructions: plugin-owned
 dispatch, mandatory approvals and owner-verified triage, HTML/browser completion,
 final evidence, and safe status/resume controls. They are injected on every
 orchestrator model turn, including after plugin reloads, not stored as permanent
 chat instructions that could affect a later Build turn. The command adds only
 a short run-specific startup notice and status/resume/cancel help to chat.
-Supply only the task, acceptance criteria, and task-specific constraints; there
+Supply the plan path, task, acceptance criteria, and task-specific constraints; there
 is no need to repeat these workflow rules. They are not appended to the stored
 task requirements. A clean first review may pass; a mandatory repair cycle or
 unchanged-seed failure rule belongs only to an explicitly requested evaluation.
 Alternatively, select or launch `orchestrator` as a subagent and give it a task; its `swarm_start` tool
-enrolls the task. Move a delegated orchestrator to its target Git checkout before
+requires both `task` and `plan` and enrolls it for plan review. Move a delegated orchestrator to its target Git checkout before
 enrollment; its builder and reviewers inherit that location. The outer parent
 does not gain permission to submit its candidates or approvals.
 Enforcement begins at enrollment, not agent selection alone.
+
+### Plan review before implementation
+
+New runs start in `PLAN_REVIEW`. No builder or reviewer is dispatched until the
+orchestrator reads the complete plan and calls `swarm_plan` with `decision: ready`.
+It reviews scope, acceptance criteria, dependencies, constraints, risks and tests.
+For ambiguity, it first records `decision: clarify` and targeted `questions`,
+then uses the question tool to ask the user. `CLARIFYING` waits without a builder
+or a human-answer deadline. `answers` records each pending question and its real
+answer; incomplete, duplicate, stale or unauthorized submissions cannot start
+work. Further clarification rounds are allowed.
+
+Once clear, the orchestrator records its review summary and answers and the
+plugin automatically releases the builder. The plan is not edited. Its pinned
+path/content/hash and clarification history go to participants and the HTML
+report. New preflight input or changed plan content invalidates the review
+request. Changed/unreadable plans after implementation block the run; resume
+requires renewed plan review when requirements changed. Preflight consumes no
+candidate rounds. Legacy runs without a plan must be restarted with `--plan`.
 
 ```text
 /swarm-status
@@ -86,7 +110,9 @@ Enforcement begins at enrollment, not agent selection alone.
   changes-requested feedback return to orchestrator triage before the builder
   restarts. It does not bypass triage or the round limit.
 - Cancel stops participants and leaves the task incomplete.
-- New user prompts during a run become clarifications and block the run,
+- In `PLAN_REVIEW`/`CLARIFYING`, ordinary answers are recorded for the orchestrator
+  and do not require resume. After implementation starts, new user prompts
+  become clarifications and block the run,
   invalidating approvals. After clarifying requirements, use `/swarm-resume`.
   Even a conversational status question conservatively counts as new input;
   use `/swarm-status` instead.
@@ -101,6 +127,8 @@ agent remains `plan`; ordinary Build sessions retain optional review behavior.
 ## Protocol
 
 ```text
+PLAN_REVIEW ↔ CLARIFYING
+    ↓ ready
 BUILDING → HANDOFF → REVIEWING → REVIEW_HANDOFF → REPORTING → APPROVED
     ↑                                    │
     └──────────── TRIAGING ←──────────────┘

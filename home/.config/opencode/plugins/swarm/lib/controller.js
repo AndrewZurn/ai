@@ -7,6 +7,7 @@ import { snapshot, trackedFiles } from "./snapshot.js";
 import { files, skills, uniqueFiles, uniqueSkills } from "./attachments.js";
 import { recoverReportTemps, writeReport } from "./html-report.js";
 import { openReport } from "./browser.js";
+import { readPlan } from "./plan.js";
 
 // A location can reload its plugin while old callbacks are finishing. Share the
 // queue in this module, but always reload durable state inside the lock.
@@ -24,6 +25,7 @@ export class SwarmController {
     this.timeout = options.timeout ?? 30 * 60 * 1000;
     this.writeReport = options.writeReport ?? writeReport;
     this.openReport = options.openReport ?? openReport;
+    this.readPlan = options.readPlan ?? readPlan;
     requireThat(Number.isInteger(this.maxRounds) && this.maxRounds > 0 &&
       Number.isFinite(this.timeout) && this.timeout > 0, "Invalid swarm limits.");
   }
@@ -114,7 +116,7 @@ export class SwarmController {
       : null;
     this.run.jobs.push({
       role, kind, sessionID, round: this.run.round, id: id("msg"), text: role === "orchestrator" &&
-        !["triage", "html_report"].includes(kind)
+        !["triage", "html_report", "plan_review"].includes(kind)
         ? `Swarm: ${this.run.phase}. Call swarm_status and report the authoritative outcome. ${this.run.reason ?? ""}`
         : packet(this.run, role),
       sent: false, done: false, priorIdleID,
@@ -139,7 +141,87 @@ export class SwarmController {
     return createHash("sha256").update(JSON.stringify({
       requirements: this.run.requirements, context: this.run.context,
       files: this.run.files, skills: this.run.skills,
+      plan: this.run.plan,
     })).digest("hex");
+  }
+
+  async loadPlan(reference) {
+    return this.readPlan(this.directory, reference, file => this.ctx.permission.assert({
+      sessionID: this.run.root, agent: "orchestrator",
+      action: "read", resources: [file],
+    }));
+  }
+
+  async requestPlan(dispatch = true) {
+    for (const job of this.run.jobs.filter(job => job.role === "orchestrator" && !job.done)) {
+      job.done = true;
+      job.cancelled = true;
+    }
+    this.run.phase = "PLAN_REVIEW";
+    this.run.planReview = {
+      request: id("plan"), requirements: this.requirementsDigest(),
+      questions: this.run.planReview?.questions ?? [],
+      answers: this.run.planReview?.answers ?? [],
+    };
+    await this.enqueue("orchestrator", "plan_review");
+    // An admitted clarification already starts a root turn. Do not queue a
+    // second prompt from inside its admission hook.
+    if (!dispatch) this.job("orchestrator").sent = true;
+  }
+
+  async checkPlan() {
+    if (!this.run?.plan || ["BLOCKED", "CANCELLED"].includes(this.run.phase)) return;
+    let current;
+    try {
+      current = await this.loadPlan(this.run.plan.reference ?? this.run.plan.path);
+    } catch (error) {
+      await this.block(`Plan cannot be read: ${error.message}`);
+      return;
+    }
+    if (current.sha256 === this.run.plan.sha256 && current.path === this.run.plan.path) return;
+    this.run.plan = current;
+    if (["PLAN_REVIEW", "CLARIFYING"].includes(this.run.phase)) {
+      await this.requestPlan();
+      await this.save();
+    } else {
+      await this.block("The plan changed. Resume to review the plan and obtain fresh approvals.");
+    }
+  }
+
+  async acceptPlan(input) {
+    requireThat(["PLAN_REVIEW", "CLARIFYING"].includes(this.run.phase), "The run is not accepting plan review.");
+    requireThat(input.request === this.run.planReview.request &&
+      this.run.planReview.requirements === this.requirementsDigest(), "Stale plan review request.");
+    const pending = this.run.planReview.questions;
+    const answered = input.answers.map(answer => answer.question);
+    requireThat(new Set(answered).size === answered.length && answered.length === pending.length &&
+      pending.every(question => answered.includes(question)), "Answer every pending plan question exactly once.");
+    requireThat(new Set(input.questions).size === input.questions.length &&
+      (input.decision === "ready" ? input.questions.length === 0 : input.questions.length > 0),
+    "Ready requires no new questions; clarify requires specific unique questions.");
+    this.run.planReview.answers.push(...input.answers);
+    if (input.answers.length) {
+      this.run.requirements += `\n\nPlan clarification answers:\n${JSON.stringify(input.answers)}`;
+    }
+    this.run.planReview.questions = input.questions;
+    this.run.planReview.requirements = this.requirementsDigest();
+    this.run.history.push({ at: this.now(), phase: "PLAN_REVIEWED", ...input });
+    this.job("orchestrator").done = true;
+    this.job("orchestrator").finished = true;
+    if (input.decision === "clarify") {
+      this.run.phase = "CLARIFYING";
+      this.run.planReview.request = id("plan");
+    } else {
+      this.run.planReview.approved = this.requirementsDigest();
+      if (this.run.findings.some(finding => finding.status === "open") ||
+        Object.values(this.run.reports).some(report => report.verdict === "changes_requested")) {
+        await this.requestTriage();
+      } else {
+        this.run.phase = "BUILDING";
+        this.run.reports = {};
+        await this.enqueue("builder");
+      }
+    }
   }
 
   approvedReviews() {
@@ -194,6 +276,7 @@ export class SwarmController {
       await this.save();
       throw error;
     }
+    await this.checkPlan();
     await this.checkCandidate();
     if (this.run.phase !== "REPORTING") return;
     if (this.now() >= this.job("orchestrator").deadline) {
@@ -298,7 +381,7 @@ export class SwarmController {
       }
       await this.ctx.session.prompt({
         sessionID: job.sessionID, id: job.id, text: job.text,
-        ...(job.role === "orchestrator" ? {} : {
+          ...(job.role === "orchestrator" && job.kind !== "plan_review" ? {} : {
           files: this.run.files, skills: this.run.skills,
         }),
         metadata: { reviewGateInternal: true, run: this.run.id },
@@ -314,9 +397,9 @@ export class SwarmController {
     }
   }
 
-  async start(sessionID, task, attachments = {}) {
+  async start(sessionID, task, attachments = {}, plan) {
     return this.locked(async () => {
-      validate(inputs.start, { task });
+      validate(inputs.start, { task, plan });
       const root = await this.ctx.session.get({ sessionID });
       requireThat(root.agent === "orchestrator",
         "Start from an orchestrator session or use /swarm.");
@@ -324,6 +407,9 @@ export class SwarmController {
         "Start the swarm from the canonical repository root, not a nested directory.");
       requireThat(!this.run || terminal(this.run.phase),
         "This checkout already has an active run. Cancel it before starting another.");
+      const document = await this.readPlan(this.directory, plan, file => this.ctx.permission.assert({
+        sessionID, agent: "orchestrator", action: "read", resources: [file],
+      }));
       // Fail before dispatch if one of the required agents is unavailable or denied.
       for (const agent of ["builder", ...reviewers]) {
         await this.ctx.agent.get({ agentID: agent });
@@ -352,16 +438,16 @@ export class SwarmController {
       this.run = {
         version: 1, id: id("run"), root: sessionID, directory: this.directory,
         location: root.location.directory,
-        requirements: task, context,
+        requirements: task, context, plan: document,
         files: uniqueFiles([...users.flatMap(user => files(user.files)), ...files(attachments.files)]),
         skills: uniqueSkills([...users.flatMap(user => skills(user.skills)), ...skills(attachments.skills)]),
         permissions: root.permissions ?? [],
-        phase: "BUILDING", round: 0, maxRounds: this.maxRounds,
+        phase: "PLAN_REVIEW", round: 0, maxRounds: this.maxRounds,
         sessions: Object.fromEntries(["builder", ...reviewers].map(role => [role, id("ses")])),
         jobs: [], findings: [], reports: {}, history: [], candidate: null,
         triageRequest: null, triage: null, reportRequest: null, htmlReport: null,
       };
-      await this.enqueue("builder");
+      await this.requestPlan();
       await this.save();
       await this.flush();
       return this.run;
@@ -370,7 +456,7 @@ export class SwarmController {
 
   async tool(name, input, sessionID, signal) {
     validate(inputs[name], input);
-    if (name === "start") return this.start(sessionID, input.task);
+    if (name === "start") return this.start(sessionID, input.task, {}, input.plan);
     // Tool calls can already be queued behind a resume transaction when their
     // old execution is interrupted. Bind them before acquiring the lock.
     const admitted = ["candidate", "report"].includes(name)
@@ -379,14 +465,17 @@ export class SwarmController {
     return this.locked(async () => {
       requireThat(this.run, "No swarm run exists in this checkout.");
       const role = await this.authorize(sessionID, name === "candidate" ? ["builder"]
-        : name === "report" ? requiredReviewers(this.run) : ["triage", "report_html"].includes(name) ? ["orchestrator"]
+        : name === "report" ? requiredReviewers(this.run) : ["triage", "report_html", "plan"].includes(name) ? ["orchestrator"]
         : ["orchestrator", "builder", ...requiredReviewers(this.run)], name === "status");
+      await this.checkPlan();
       await this.checkCandidate();
       if (["candidate", "report"].includes(name)) {
-        requireThat(admitted && admitted === this.job(role)?.id,
+        requireThat(admitted && admitted === this.job(role)?.id && !this.job(role).cancelled,
           "Stale dispatch: this call belongs to a previous or undispatched turn.");
       }
-      if (name === "report_html") {
+      if (name === "plan") {
+        requireThat(["PLAN_REVIEW", "CLARIFYING"].includes(this.run.phase), "The run is not accepting plan review.");
+      } else if (name === "report_html") {
         requireThat(["REPORTING", "APPROVED"].includes(this.run.phase),
           "The run is not accepting an HTML report.");
       } else if (name === "triage") {
@@ -403,7 +492,9 @@ export class SwarmController {
         await this.flush();
         return this.run;
       }
-      if (name === "report_html") {
+      if (name === "plan") {
+        await this.acceptPlan(input);
+      } else if (name === "report_html") {
         await this.renderReport(input, signal);
       } else if (name === "triage") {
         const next = structuredClone(this.run);
@@ -457,6 +548,8 @@ export class SwarmController {
         await this.block("Cancelled by the user. No approval was issued.", "CANCELLED");
       } else if (command === "resume") {
         requireThat(this.run.phase === "BLOCKED", "Only a blocked run can resume.");
+        requireThat(this.run.plan, "This legacy run has no plan. Start a new /swarm --plan <path> run.");
+        this.run.plan = await this.loadPlan(this.run.plan.reference ?? this.run.plan.path);
         const reportResume = this.run.reportRequest && this.approvedReviews() &&
           this.run.reportRequest.candidate === this.run.candidate.id &&
           this.run.reportRequest.requirements === this.requirementsDigest() &&
@@ -468,7 +561,9 @@ export class SwarmController {
         requireThat(this.run.stopFailures.length === 0,
           "Cannot resume: prior child turns could not be confirmed stopped. Retry after resolving stopFailures.");
         this.run.reason = null;
-        if (reportResume) {
+        if (this.run.plan && this.run.planReview?.approved !== this.requirementsDigest()) {
+          await this.requestPlan();
+        } else if (reportResume) {
           await this.requestReport();
         } else if (this.run.findings.some(finding => finding.status === "open") ||
           Object.values(this.run.reports).some(report => report.verdict === "changes_requested")) {
@@ -500,6 +595,13 @@ export class SwarmController {
       this.run.files = uniqueFiles([...this.run.files, ...files(prompt.files)]);
       this.run.skills = uniqueSkills([...this.run.skills, ...skills(prompt.skills)]);
       this.run.history.push({ at: this.now(), messageID, clarification: prompt.text });
+      if (["PLAN_REVIEW", "CLARIFYING"].includes(this.run.phase)) {
+        this.job("orchestrator").done = true;
+        this.job("orchestrator").finished = true;
+        await this.requestPlan(false);
+        await this.save();
+        return;
+      }
       await this.block("New user input invalidated the candidate. Use /swarm-resume after clarifying requirements.");
       await this.flush();
     });
@@ -513,6 +615,7 @@ export class SwarmController {
         root.location.directory !== this.run.location)) {
         await this.block("The orchestrator changed agent or location.");
       }
+      await this.checkPlan();
       await this.checkCandidate();
       await this.flush();
       if (this.run.phase === "APPROVED" && this.run.htmlReport?.browser?.state === "requested") {
@@ -523,8 +626,8 @@ export class SwarmController {
       }
       if (terminal(this.run.phase)) return;
       const triageJob = this.job("orchestrator");
-      if (["TRIAGING", "REPORTING"].includes(this.run.phase) &&
-        ["triage", "html_report"].includes(triageJob?.kind) &&
+      if (["PLAN_REVIEW", "TRIAGING", "REPORTING"].includes(this.run.phase) &&
+        ["plan_review", "triage", "html_report"].includes(triageJob?.kind) &&
         !triageJob.done && this.now() >= triageJob.deadline) {
         await this.block(`Orchestrator ${this.run.phase.toLowerCase()} exceeded its deadline.`);
       }
