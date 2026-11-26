@@ -29,6 +29,8 @@ Use the scripts below as the primary validation mechanisms.
   - `bash scripts/test-links.sh`
 - Test OpenCode profiles and the launcher in isolated temporary homes:
   - `node --test scripts/opencode-profile.test.mjs`
+- Test the swarm operator utility without a live service:
+  - `node --test scripts/opencode-swarms.test.mjs`
 - Test the OpenCode Go usage plugin with Node's built-in runner:
   - `node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js`
 - Test the OpenAI Codex usage plugin with Node's built-in runner:

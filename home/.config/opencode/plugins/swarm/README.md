@@ -425,6 +425,10 @@ decisions, review reports, history, and dispatch outbox. Session and prompt IDs
 are saved before dispatch and reused on retries. Startup recovery reconciles
 saved session outcomes; live events are an optimization, not the only record.
 A 30-second recovery sweep checks deadlines and catches missed events.
+Recovery starts **after plugin setup returns**; it cannot hold agent/plugin
+activation while waiting for session admission. Events and timer ticks coalesce
+into one active sweep plus at most one pending sweep. A failed event subscription
+is retried on the next sweep.
 Pending triage and HTML reporting use the durable outbox and per-turn deadline;
 missing or late submissions block the run. An idle orchestrator turn is merely
 waiting, not workflow completion. An all-approved clean review needs no triage
@@ -433,6 +437,96 @@ Failed participant interruptions are retained as `stopFailures`. Resume retries
 stopping prior child turns and stays blocked until their stopped state is
 confirmed. Candidate/report calls are bound to their dispatch when invoked, so
 an old call queued behind resume cannot submit into the next builder turn.
+
+Session/agent/permission requests, storage reads, and candidate fingerprints have
+a **60-second operation deadline**, separate from the participant's turn deadline.
+`operationTimeoutSeconds` (positive number) overrides it. This includes permission
+approval waits: after a timeout, retry the operation and approve the new request.
+SDK requests receive cancellation signals. Tool cancellation and plugin unload
+abort those waits, and cancelled callbacks cannot write new controller state.
+Authorized `/swarm-cancel` preempts an in-flight controller operation before
+waiting for the queue; failed child stops remain visible in `stopFailures`.
+Cancellation does not queue another orchestrator notification.
+
+A timed-out prompt/create request that ignores cancellation remains tracked
+across in-process reloads. A participant cannot be reused until that admission
+settles and a new stop check succeeds. An uncertain root additionally requires
+`oc2-swarms interrupt/cancel` to verify and acknowledge an empty native inbox;
+idle execution alone cannot clear that fence through ordinary resume.
+Recovery of an interrupted, idle
+orchestrator blocks the run without waking it again; use `/swarm-resume`
+explicitly. Resume acknowledges that interruption and retains the same review
+and deadline safeguards. A normal successful orchestrator turn can still wait
+for its builder/reviewers.
+
+Cleanup does not wait for broken event sources or outstanding recovery requests.
+Writes already in progress are awaited to prevent late storage commits from
+overwriting newer state. This is not a watchdog for a blocked JavaScript event
+loop, stalled storage write, or uninterruptible filesystem/report I/O. The
+OpenCode service may still need an explicit restart for those failures; never
+delete its database or session history to recover a run.
+
+### Operator recovery without an agent
+
+`oc2-swarms` is a terminal utility, linked by the normal home-link setup.
+Before linking, use `node scripts/opencode-swarms.mjs --help` from this checkout.
+It uses OpenCode's CLI discovery/authentication, not direct database access.
+
+```sh
+oc2-swarms list                         # Active and blocked runs
+oc2-swarms list --all --json             # Include approved/cancelled records
+oc2-swarms inspect <run-or-session-id>
+oc2-swarms interrupt <run-or-session-id>  # Pause and stop execution
+oc2-swarms resume <run-or-session-id>     # Explicitly continue a blocked run
+oc2-swarms cancel <run-or-session-id>     # End the run; preserve history/code
+oc2-swarms help interrupt                # Detailed, offline subcommand help
+```
+
+`start` is an alias for resume, not plan enrollment; `kill` is an alias for
+cancel, not session deletion or process termination. New work still requires
+`/swarm --plan <path>`. No bulk mutation is supported. Inspection is read-only
+and does not acquire the workflow queue or add synthetic messages/model turns.
+It shows run state, stop errors, participants and outstanding admissions, not
+task prompts, requirements or source contents.
+`--help`, `help <command>` and `<command> --help` work without a running service
+and include examples, options, safety details and exit codes.
+
+Interrupt/cancel first persist a run-ID-bound operator fence. The CLI then
+cancels queued inputs and interrupts the root plus its descendant sessions
+through native session APIs. Confirmation clears the fence only after stop
+checks pass. The CLI must also explicitly acknowledge its successful native
+root-inbox inspection; ordinary workflow recovery cannot make that assertion.
+The Promise plugin API does not expose inbox inspection, so this is an
+authenticated operator acknowledgement, not proof against a hostile client.
+An inbox-endpoint error never counts as proof that a session is absent.
+Starting/resuming a run is blocked while confirmation is pending,
+so a new run cannot reuse those sessions halfway through an operator stop.
+A CLI crash, timeout, unsettled admission or partial failure keeps that fence:
+inspect the errors, then explicitly retry interrupt/cancel. This includes
+undelivered user input, not only plugin messages; history and code are not deleted.
+
+The plugin registers authenticated `swarm-operator` RPC methods (`inspect`,
+`control`, `confirm`) during setup without storage reads. Operator controls do not
+depend on an agent turn. Cancel/interrupt preemption is bound to the exact saved
+run ID; a stale caller cannot abort another run's enrollment. Inspection remains
+available while the workflow queue is busy, unless the service or storage itself
+is unavailable. Access follows the service's authentication boundary; it is an
+operator surface, not an additional sandbox against other authenticated clients.
+
+If the plugin is unavailable, `oc2-swarms interrupt <root-session-id>` has a
+native-only fallback. It still stops the selected tree and cancels queued input,
+but reports the ledger as unconfirmed. Cancel/resume do not silently fall back.
+Discovery covers loaded canonical Git checkouts and active swarm sessions in
+the current service, not unloaded history or independently hosted services.
+Use `--directory <checkout>` with an exact target when discovery is unavailable.
+`--timeout-seconds` defaults to 15 per API call; calls are bounded and independent
+locations/participants are checked with at most four concurrent requests.
+Exit codes are 0 (confirmed), 1 (failed/invalid), and 2 (incomplete/unavailable).
+Resume returns 2 if dispatch returns the run to `BLOCKED`, even when participant
+stop checks succeeded. Descendant pagination retains and checks each parent
+filter; unrelated records abort the stop before native mutations.
+No service restart, dependency installation, database edits, or session deletion
+is performed. `OPENCODE_SWARMS_BIN` overrides the default `opencode2` executable.
 
 Defaults are **five candidate rounds** and **30 minutes per dispatched turn**.
 Plugin options `maxRounds` (positive integer) and `timeoutMinutes` (positive
@@ -497,6 +591,7 @@ No downloads or provider requests:
 ```sh
 node --test home/.config/opencode/plugins/swarm/test/*.test.js
 node --test scripts/opencode-profile.test.mjs
+node --test scripts/opencode-swarms.test.mjs
 ```
 
 Tests cover workflow validation, complete description-based specialist selection,
@@ -507,6 +602,10 @@ repair rounds, missing/denied UI reviewers, blocked UI checks, ownership and dis
 negotiation, stale/forged/malformed reports, candidate changes, restart recovery,
 retry-safe outbox delivery, blocked/missing reports, deadlines, cancellation,
 permission failures, API registration, and real Git fingerprints.
+Failure-injection tests also cover startup ordering, coalesced event storms,
+event reconnection, hung SDK requests/interrupts, cancellation preemption,
+unload with uncooperative work, shared reload queues, late admissions, stale
+writes, and interrupted-orchestrator recovery.
 HTML tests cover escaped content, private/atomic publication, output ownership,
 fingerprint preservation, approval/role guards, retries, failures, and mocked
 browser launches. Tests do not open browsers or create reports for users.

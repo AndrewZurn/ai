@@ -285,7 +285,15 @@ async function scriptedRun(t, uiChanges) {
       interrupt: async () => {},
     },
   };
-  const configure = () => setup(ctx, { openReport: async file => { openedReports.push(file); } });
+  const configure = async () => {
+    const recovered = Promise.withResolvers();
+    const cleanup = await setup(ctx, {
+      openReport: async file => { openedReports.push(file); },
+      onRecovery: recovered.resolve,
+    });
+    await recovered.promise;
+    return cleanup;
+  };
   const cleanup = await configure();
   t.after(cleanup);
   assert.equal(tools.size, 8);

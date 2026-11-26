@@ -3,6 +3,7 @@ import { inputs, requiredReviewers, uiReviewer } from "./protocol.js"
 import { repository } from "./snapshot.js"
 import { orchestratorInstructions } from "./instructions.js"
 import { planCommand } from "./plan.js"
+import { registerOperator } from "./operator.js"
 
 function readOnlyGit(command) {
   if (!/^[A-Za-z0-9_./:@^~+= -]+$/.test(command)) return false
@@ -51,14 +52,14 @@ export async function setup(ctx, dependencies = {}) {
     gate = new SwarmController(ctx, directory, {
       maxRounds: ctx.options.maxRounds,
       timeout: ctx.options.timeoutMinutes === undefined ? undefined : ctx.options.timeoutMinutes * 60_000,
+      operationTimeout: ctx.options.operationTimeoutSeconds === undefined
+        ? undefined : ctx.options.operationTimeoutSeconds * 1000,
       ...dependencies,
     })
-    const enrolled = await ctx.storage.get(gate.key)
     const dispatchTargets = new Set([
       "builder", ...Object.keys(gate.workflow?.reviewers ?? {}),
-      ...(enrolled?.workflow ? Object.keys(enrolled.workflow.reviewers)
-        : enrolled ? [...requiredReviewers(enrolled), uiReviewer] : []),
     ])
+    if (dependencies.operatorRpc) await registerOperator(ctx, gate, dependencies.operatorRpc)
 
     // Markdown creates the builder ID; derive its base prompt and permissions
     // from the resolved Build definition, without assigning a shared model.
@@ -93,7 +94,7 @@ export async function setup(ctx, dependencies = {}) {
           options: { codemode: false },
           execute: async (input, context) => ({
             content: view(await gate.tool(name, input, context.sessionID,
-              name === "report_html" ? context.signal : undefined)),
+              context.signal)),
           }),
         })
       }
@@ -171,7 +172,8 @@ export async function setup(ctx, dependencies = {}) {
       if (event.action === "subagent") {
         const session = await ctx.session.get({ sessionID: event.sessionID })
         if (session.agent === "orchestrator" &&
-          (!event.resources.length || event.resources.some(resource => !dispatchTargets.has(resource)))) {
+          (!event.resources.length || event.resources.some(resource =>
+            !dispatchTargets.has(resource) && !state.dispatchTargets?.includes(resource)))) {
           event.effect = "deny"
           event.message = "Swarm: dispatch is limited to the builder and configured/enrolled reviewers."
           return
@@ -202,28 +204,64 @@ export async function setup(ctx, dependencies = {}) {
       }
     })
     const abort = new AbortController()
-    const recover = () => gate.reconcile().catch(error => gate.fail(error))
-      .catch(error => console.error("swarm recovery failed", error))
-    const stream = (async () => {
-      for await (const event of ctx.event.subscribe({
-        types: ["session.execution.succeeded", "session.execution.failed",
-          "session.execution.interrupted", "session.agent.selected", "session.moved", "filesystem.changed"],
-        signal: abort.signal,
-      })) {
-        if (event.location?.directory !== ctx.location.directory) continue
-        // Do not await session operations in the event consumer: dispatch and
-        // interruption can themselves publish events on this stream.
-        void recover()
-      }
-    })().catch(error => {
-      if (!abort.signal.aborted) return gate.fail(error)
-    })
-    const timer = setInterval(() => void recover(), 30_000)
+    let recovery
+    let dirty = false
+    let started = false
+    const recover = () => {
+      if (abort.signal.aborted) return
+      dirty = true
+      if (!started || recovery) return recovery
+      recovery = (async () => {
+        while (dirty && !abort.signal.aborted) {
+          dirty = false
+          try {
+            await gate.reconcile()
+          } catch (error) {
+            if (abort.signal.aborted) break
+            try { await gate.fail(error) }
+            catch (failure) { console.error("swarm recovery failed", failure) }
+          }
+        }
+      })().finally(() => {
+        recovery = undefined
+        dependencies.onRecovery?.()
+      })
+      return recovery
+    }
+    let listening = false
+    const listen = () => {
+      if (listening || abort.signal.aborted) return
+      listening = true
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({
+            types: ["session.execution.succeeded", "session.execution.failed",
+              "session.execution.interrupted", "session.agent.selected", "session.moved", "filesystem.changed"],
+            signal: abort.signal,
+          })) {
+            if (event.location?.directory !== ctx.location.directory) continue
+            // Session operations can themselves publish events on this stream.
+            void recover()
+          }
+        } catch (error) {
+          if (!abort.signal.aborted) console.error("swarm event stream failed; recovery sweep will reconnect", error)
+        } finally {
+          listening = false
+        }
+      })()
+    }
+    listen()
+    const timer = setInterval(() => { listen(); void recover() }, 30_000)
     timer.unref?.()
-    await recover()
+    // Prompt admission waits for location plugins to be ready. Recovery may
+    // dispatch prompts, so it must never be awaited by plugin setup itself.
+    const startup = setTimeout(() => { started = true; void recover() }, 0)
     return async () => {
+      clearTimeout(startup)
       clearInterval(timer)
       abort.abort()
-      await stream
+      gate.close()
+      // Do not let a broken event source or an uncooperative SDK operation hold
+      // location shutdown. Detached work already has rejection handlers.
     }
 }

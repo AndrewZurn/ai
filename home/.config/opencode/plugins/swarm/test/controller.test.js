@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SwarmController } from "../lib/controller.js";
 import { requiredReviewers, reviewers, reviewRounds, roundReviewers, uiReviewer } from "../lib/protocol.js";
+import { operatorDefinition, registerOperator } from "../lib/operator.js";
 
 export function fixture(options = {}) {
   const data = new Map();
@@ -1360,6 +1361,301 @@ test("resume refuses an interrupt response that leaves a child running", async (
   await assert.rejects(f.gate.control("ses_root", "resume"), /could not be confirmed stopped/);
   assert.equal(f.state().phase, "BLOCKED");
   assert.match(f.state().stopFailures[0].reason, /still running/);
+});
+
+test("a hung participant interrupt is bounded and remains visible without blocking status", async () => {
+  const f = fixture({ operationTimeout: 15 });
+  await f.start();
+  f.ctx.session.interrupt = () => new Promise(() => {});
+  await f.gate.control("ses_root", "cancel");
+  assert.equal(f.state().phase, "CANCELLED");
+  assert.match(f.state().stopFailures[0].reason, /session.interrupt timed out/);
+  assert.equal((await f.tool("status", {})).phase, "CANCELLED");
+  await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
+});
+
+test("only an authorized cancellation preempts a stuck permission call", async () => {
+  const f = fixture({ operationTimeout: 1000 });
+  await f.start();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let permissionSignal;
+  f.ctx.permission.assert = (_, { signal }) => {
+    permissionSignal = signal;
+    entered.resolve();
+    return release.promise;
+  };
+  const running = f.tool("status", {});
+  const rejected = assert.rejects(running, /cancelled by the user/);
+  await entered.promise;
+  await assert.rejects(f.gate.control("ses_impostor", "cancel"), /cannot cancel/);
+  assert.equal(permissionSignal.aborted, false);
+  const deliveries = f.deliveries.size;
+  await f.gate.control("ses_root", "cancel");
+  await rejected;
+  assert.equal(permissionSignal.aborted, true);
+  assert.equal(f.state().phase, "CANCELLED");
+  assert.equal(f.deliveries.size, deliveries, "cancellation must not wake the orchestrator");
+  const saved = f.state();
+  release.resolve();
+  await release.promise;
+  assert.deepEqual(f.state(), saved, "late completion cannot overwrite cancellation");
+});
+
+test("a timed-out admission cannot be reused until it settles and is stopped again", async () => {
+  const f = fixture({ autoPlan: false, operationTimeout: 15 });
+  await f.start();
+  const prompt = f.ctx.session.prompt;
+  const release = Promise.withResolvers();
+  const delivered = Promise.withResolvers();
+  f.ctx.session.prompt = async input => {
+    if (input.sessionID !== "ses_root") {
+      await release.promise;
+      await prompt(input);
+      delivered.resolve();
+      return input;
+    }
+    return prompt(input);
+  };
+  await f.tool("plan", planInput(f));
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.match(f.state().reason, /session.prompt timed out/);
+  assert.match(f.state().stopFailures[0].reason, /unsettled admission/);
+  await assert.rejects(f.restart().control("ses_root", "resume"), /could not be confirmed stopped/);
+  release.resolve();
+  await delivered.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  f.ctx.session.prompt = prompt;
+  await f.gate.control("ses_root", "resume");
+  assert.equal(f.state().phase, "BUILDING");
+  assert.deepEqual(f.state().stopFailures, []);
+  assert.equal(f.state().jobs.filter(job => job.role === "builder").length, 2);
+});
+
+test("root admissions fence resume, cancellation and replacement until settlement and an explicit stop", async () => {
+  const f = fixture({ autoPlan: false, operationTimeout: 15 });
+  const prompt = f.ctx.session.prompt;
+  const release = Promise.withResolvers();
+  const delivered = Promise.withResolvers();
+  f.ctx.session.prompt = async input => {
+    await release.promise;
+    await prompt(input);
+    delivered.resolve();
+    return input;
+  };
+  await f.start();
+  const original = f.state().id;
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.equal(f.state().rootStopRequired, true);
+  assert.equal(f.state().stopFailures[0].sessionID, "ses_root");
+  await assert.rejects(f.gate.control("ses_root", "resume"), /could not be confirmed stopped/);
+  await f.gate.control("ses_root", "cancel");
+  assert.equal(f.state().phase, "CANCELLED");
+  await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
+  release.resolve();
+  await delivered.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  f.ctx.session.prompt = prompt;
+  await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
+  assert.match(f.state().stopFailures[0].reason, /interrupt its session/);
+  await f.ctx.session.interrupt({ sessionID: "ses_root" });
+  await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
+  let operator;
+  registerOperator({ rpc: { register: (_, methods) => { operator = methods; } } },
+    f.gate, operatorDefinition);
+  const context = { error: (_, message) => { throw new Error(message); } };
+  const stopped = await operator.control({ runID: f.state().id, action: "cancel" }, context);
+  await operator.confirm({
+    runID: f.state().id, operationID: stopped.operatorStop.id, rootInboxEmpty: true,
+  }, context);
+  await f.start();
+  assert.notEqual(f.state().id, original);
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+});
+
+test("a missing child cannot bypass an unresolved create admission", async () => {
+  const f = fixture({ autoPlan: false, operationTimeout: 15 });
+  await f.start();
+  const get = f.ctx.session.get;
+  f.ctx.session.get = input => {
+    if (!f.sessions.has(input.sessionID)) throw Object.assign(new Error("not found"),
+      { _tag: "SessionNotFoundError" });
+    return get(input);
+  };
+  const create = f.ctx.session.create;
+  const release = Promise.withResolvers();
+  const created = Promise.withResolvers();
+  f.ctx.session.create = async input => {
+    await release.promise;
+    const child = await create(input);
+    created.resolve();
+    return child;
+  };
+  await f.tool("plan", planInput(f));
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.match(f.state().stopFailures[0].reason, /unsettled admission/);
+  await assert.rejects(f.gate.control("ses_root", "resume"), /could not be confirmed stopped/);
+  await assert.rejects(f.start(), /prior child turns could not be confirmed stopped/);
+  release.resolve();
+  await created.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  f.ctx.session.create = create;
+  await f.gate.control("ses_root", "resume");
+  assert.equal(f.state().phase, "BUILDING");
+  assert.deepEqual(f.state().stopFailures, []);
+});
+
+test("an idle root with a late queued prompt cannot clear its admission fence through resume", async () => {
+  const f = fixture({ autoPlan: false, operationTimeout: 15 });
+  const release = Promise.withResolvers();
+  const settled = Promise.withResolvers();
+  const queued = [];
+  f.ctx.session.prompt = async input => {
+    await release.promise;
+    queued.push(input);
+    settled.resolve();
+    return input;
+  };
+  await f.start();
+  assert.equal(f.state().rootStopRequired, true);
+  release.resolve();
+  await settled.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(f.sessions.get("ses_root").time.busy, undefined, "admission has queued but not started");
+  await assert.rejects(f.gate.control("ses_root", "resume"), /could not be confirmed stopped/);
+  assert.match(f.state().stopFailures[0].reason, /inbox is unconfirmed/);
+  assert.equal(queued.length, 1, "resume cannot enqueue a second root prompt");
+  assert.equal(f.state().rootStopRequired, true);
+  let operator;
+  registerOperator({ rpc: { register: (_, methods) => { operator = methods; } } },
+    f.gate, operatorDefinition);
+  const context = { error: (_, message) => { throw new Error(message); } };
+  const stopped = await operator.control({ runID: f.state().id, action: "interrupt" }, context);
+  await assert.rejects(operator.confirm({
+    runID: f.state().id, operationID: stopped.operatorStop.id,
+  }, context), /root inbox inspection/);
+  assert.equal(f.state().rootStopRequired, true);
+  queued.length = 0; // The operator's native inbox cancellation/inspection.
+  await operator.confirm({
+    runID: f.state().id, operationID: stopped.operatorStop.id, rootInboxEmpty: true,
+  }, context);
+  assert.equal(f.state().rootStopRequired, false);
+});
+
+test("a cancellation authorized for an old run cannot preempt replacement enrollment", async () => {
+  const f = fixture({ autoPlan: false });
+  await f.start();
+  await f.gate.control("ses_root", "cancel");
+  const original = f.state().id;
+  const authorized = Promise.withResolvers();
+  const releaseAuthorization = Promise.withResolvers();
+  const get = f.ctx.session.get;
+  f.ctx.session.get = async input => {
+    if (input.sessionID === "ses_root") {
+      authorized.resolve();
+      await releaseAuthorization.promise;
+    }
+    return get(input);
+  };
+  const oldCancellation = f.gate.control("ses_root", "cancel");
+  const rejected = assert.rejects(oldCancellation, /run changed/);
+  await authorized.promise;
+  f.sessions.set("ses_replacement", {
+    id: "ses_replacement", agent: "orchestrator", location: { directory: "/repo" }, time: {},
+  });
+  f.messages.set("ses_replacement", []);
+  const enrolling = Promise.withResolvers();
+  const releaseEnrollment = Promise.withResolvers();
+  let enrollmentSignal;
+  f.ctx.permission.assert = async (_, { signal }) => {
+    enrollmentSignal = signal;
+    enrolling.resolve();
+    await releaseEnrollment.promise;
+  };
+  const replacement = f.gate.start("ses_replacement", "New task", {}, "PLAN.md");
+  await enrolling.promise;
+  const attempted = Promise.withResolvers();
+  const interrupt = f.gate.runtime.interrupt.bind(f.gate.runtime);
+  f.gate.runtime.interrupt = runID => {
+    const result = interrupt(runID);
+    attempted.resolve(result);
+    return result;
+  };
+  releaseAuthorization.resolve();
+  assert.equal(await attempted.promise, false);
+  assert.equal(enrollmentSignal.aborted, false);
+  releaseEnrollment.resolve();
+  await replacement;
+  await rejected;
+  assert.notEqual(f.state().id, original);
+  assert.equal(f.state().root, "ses_replacement");
+  assert.equal(f.state().phase, "PLAN_REVIEW");
+});
+
+test("operator stop leases prevent run reuse until an exact, verified confirmation", async () => {
+  const f = fixture();
+  await f.start();
+  await f.finish("orchestrator");
+  let handlers;
+  registerOperator({ rpc: { register: (_, methods) => { handlers = methods; } } },
+    f.gate, operatorDefinition);
+  const context = { error: (_, message) => { throw new Error(message); } };
+  const stopped = await handlers.control({ runID: f.state().id, action: "interrupt" }, context);
+  assert.equal(stopped.phase, "BLOCKED");
+  assert(stopped.operatorStop.id);
+  await assert.rejects(f.gate.control("ses_root", "resume"), /awaiting confirmation/);
+  await assert.rejects(f.start(), /awaiting confirmation/);
+  await assert.rejects(handlers.confirm({
+    runID: f.state().id, operationID: "stale-stop", rootInboxEmpty: true,
+  }, context), /operator stop changed/);
+  await f.ctx.session.interrupt({ sessionID: "ses_root" });
+  await handlers.confirm({
+    runID: f.state().id, operationID: stopped.operatorStop.id, rootInboxEmpty: true,
+  }, context);
+  assert.equal(f.state().operatorStop, undefined);
+  await f.gate.control("ses_root", "resume");
+  assert.equal(f.state().phase, "BUILDING");
+});
+
+test("interrupted idle orchestrators block without auto-wake and resume acknowledges the interruption", async () => {
+  const f = fixture();
+  await f.start();
+  await f.ctx.session.interrupt({ sessionID: "ses_root" });
+  const deliveries = f.deliveries.size;
+  await f.restart().reconcile();
+  assert.equal(f.state().phase, "BLOCKED");
+  assert.match(f.state().reason, /Orchestrator interrupted/);
+  assert.equal(f.deliveries.size, deliveries);
+  await f.restart().reconcile();
+  assert.equal(f.deliveries.size, deliveries);
+  await f.gate.control("ses_root", "resume");
+  await f.gate.reconcile();
+  assert.equal(f.state().phase, "BUILDING");
+});
+
+test("tool cancellation fences a candidate even when fingerprint work ignores cancellation", async () => {
+  const f = fixture();
+  await f.start();
+  const fingerprint = f.gate.snapshot;
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  f.gate.snapshot = async () => { entered.resolve(); return release.promise; };
+  const abort = new AbortController();
+  const submitting = f.gate.tool("candidate", candidateInput(), f.state().sessions.builder, abort.signal);
+  const rejected = assert.rejects(submitting, /candidate cancelled/);
+  await entered.promise;
+  abort.abort(new Error("candidate cancelled"));
+  await rejected;
+  f.gate.snapshot = fingerprint;
+  const saved = await f.tool("status", {});
+  release.resolve({ digest: "late-candidate", files: [] });
+  await release.promise;
+  assert.deepEqual(f.state(), saved);
+  assert.equal(f.state().candidate, null);
 });
 
 test("an old candidate call queued behind resume cannot submit into the new dispatch", async () => {

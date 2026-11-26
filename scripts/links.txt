@@ -7,6 +7,7 @@
 .config/opencode/cli.json
 .config/opencode/AGENTS.md
 .local/bin/oc2
+.local/bin/oc2-swarms
 .local/bin/oc2-restart-service
 .gemini/settings.json
 .gemini/skills

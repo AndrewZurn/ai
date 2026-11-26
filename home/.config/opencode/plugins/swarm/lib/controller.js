@@ -9,17 +9,16 @@ import { recoverReportTemps, writeReport } from "./html-report.js";
 import { openReport } from "./browser.js";
 import { readPlan } from "./plan.js";
 import { readWorkflow, validateWorkflow } from "./workflow.js";
+import { ControllerRuntime } from "./runtime.js";
 
-// A location can reload its plugin while old callbacks are finishing. Share the
-// queue in this module, but always reload durable state inside the lock.
-const queues = new Map();
 const id = prefix => `${prefix}_${randomUUID().replaceAll("-", "")}`;
 
 export class SwarmController {
   constructor(ctx, directory, options = {}) {
-    this.ctx = ctx;
     this.directory = directory;
     this.key = `runs/${createHash("sha256").update(directory).digest("hex")}/active`;
+    this.runtime = new ControllerRuntime(this.key, options.operationTimeout);
+    this.ctx = this.runtime.context(ctx);
     this.snapshot = options.snapshot ?? snapshot;
     this.now = options.now ?? Date.now;
     this.maxRounds = options.maxRounds ?? 5;
@@ -38,19 +37,17 @@ export class SwarmController {
       Number.isFinite(this.timeout) && this.timeout > 0, "Invalid swarm limits.");
   }
 
-  async locked(action) {
-    const previous = queues.get(this.key) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(async () => {
+  async locked(action, signal, enrollment = false) {
+    return this.runtime.locked(async () => {
       const stored = await this.ctx.storage.get(this.key);
       this.run = stored ? structuredClone(stored) : null;
+      this.runtime.bind(enrollment ? null : this.run?.id);
       return action();
-    });
-    queues.set(this.key, next);
-    try {
-      return await next;
-    } finally {
-      if (queues.get(this.key) === next) queues.delete(this.key);
-    }
+    }, signal);
+  }
+
+  close() {
+    this.runtime.close();
   }
 
   async save() {
@@ -65,7 +62,8 @@ export class SwarmController {
         record: entry => this.recordArtifact(entry),
       });
     }
-    return this.snapshot(directory, await this.artifacts());
+    const artifactsNow = await this.artifacts();
+    return this.runtime.wait("candidate fingerprint", () => this.snapshot(directory, artifactsNow));
   }
 
   async artifacts() {
@@ -383,17 +381,34 @@ export class SwarmController {
     await this.save();
   }
 
-  async stopParticipants() {
+  async stopParticipants({ rootInboxConfirmed = false } = {}) {
+    if (this.runtime.pending(this.run.root).length) this.run.rootStopRequired = true;
     const participants = [...new Set(this.run.jobs
-      .filter(job => job.role !== "orchestrator").map(job => job.sessionID))];
+      .filter(job => job.role !== "orchestrator").map(job => job.sessionID)
+      .concat(this.run.rootStopRequired ? [this.run.root] : []))];
     const results = await Promise.allSettled(participants.map(async sessionID => {
+      requireThat(this.runtime.pending(sessionID).length === 0,
+        `Session ${sessionID} has an unsettled admission; retry stopping it after the request settles.`);
+      let session;
       try {
-        await this.ctx.session.get({ sessionID });
+        session = await this.ctx.session.get({ sessionID });
       } catch (error) {
         if (error?._tag === "SessionNotFoundError") return;
         throw error;
       }
+      if (sessionID === this.run.root) {
+        // A root tool may be the caller. Do not deadlock by interrupting its own
+        // turn: the operator must interrupt the root before retrying recovery.
+        requireThat(!(session.time.busy > (session.time.idle ?? 0)),
+          "The orchestrator has an uncertain admission; interrupt its session before retrying.");
+        requireThat(rootInboxConfirmed,
+          "The orchestrator inbox is unconfirmed; use oc2-swarms interrupt/cancel to clear queued input.");
+        this.run.rootStopRequired = false;
+        return;
+      }
       await this.ctx.session.interrupt({ sessionID, resume: false });
+      requireThat(this.runtime.pending(sessionID).length === 0,
+        `Session ${sessionID} has an unsettled admission; retry stopping it after the request settles.`);
       const stopped = await this.ctx.session.get({ sessionID });
       requireThat(!(stopped.time.busy > (stopped.time.idle ?? 0)),
         `Session ${sessionID} is still running.`);
@@ -403,7 +418,7 @@ export class SwarmController {
       : []);
   }
 
-  async block(reason, phase = "BLOCKED") {
+  async block(reason, phase = "BLOCKED", notify = true) {
     this.run.phase = phase;
     this.run.reason = reason;
     this.run.history.push({
@@ -414,8 +429,10 @@ export class SwarmController {
       job.done = true;
       job.cancelled = true;
     }
-    const root = await this.ctx.session.get({ sessionID: this.run.root }).catch(() => null);
-    if (root?.agent === "orchestrator" && root.location.directory === this.run.location) {
+    if (this.runtime.pending(this.run.root).length) this.run.rootStopRequired = true;
+    const root = notify && !this.run.rootStopRequired
+      ? await this.ctx.session.get({ sessionID: this.run.root }).catch(() => null) : null;
+    if (notify && root?.agent === "orchestrator" && root.location.directory === this.run.location) {
       await this.enqueue("orchestrator");
     }
     await this.save();
@@ -460,14 +477,23 @@ export class SwarmController {
           return;
         }
       }
-      await this.ctx.session.prompt({
-        sessionID: job.sessionID, id: job.id, text: job.text,
-          ...(job.role === "orchestrator" && job.kind !== "plan_review" ? {} : {
-          files: this.run.files, skills: this.run.skills,
-        }),
-        metadata: { reviewGateInternal: true, run: this.run.id },
-        delivery: "queue",
-      });
+      if (job.role === "orchestrator") {
+        requireThat(!this.run.rootStopRequired && this.runtime.pending(job.sessionID).length === 0,
+          "The orchestrator has an unsettled admission; stop it before another dispatch.");
+      }
+      try {
+        await this.ctx.session.prompt({
+          sessionID: job.sessionID, id: job.id, text: job.text,
+            ...(job.role === "orchestrator" && job.kind !== "plan_review" ? {} : {
+            files: this.run.files, skills: this.run.skills,
+          }),
+          metadata: { reviewGateInternal: true, run: this.run.id },
+          delivery: "queue",
+        });
+      } catch (error) {
+        if (job.role === "orchestrator") this.run.rootStopRequired = true;
+        throw error;
+      }
       job.sent = true;
     }));
     await this.save();
@@ -478,7 +504,7 @@ export class SwarmController {
     }
   }
 
-  async start(sessionID, task, attachments = {}, plan) {
+  async start(sessionID, task, attachments = {}, plan, signal) {
     return this.locked(async () => {
       validate(inputs.start, { task, plan });
       const root = await this.ctx.session.get({ sessionID });
@@ -488,6 +514,8 @@ export class SwarmController {
         "Start the swarm from the canonical repository root, not a nested directory.");
       requireThat(!this.run || terminal(this.run.phase),
         "This checkout already has an active run. Cancel it before starting another.");
+      requireThat(!this.run?.operatorStop,
+        "An operator stop is awaiting confirmation. Retry oc2-swarms interrupt/cancel first.");
       if (this.workflowError) throw this.workflowError;
       const document = await this.readPlan(this.directory, plan, file => this.ctx.permission.assert({
         sessionID, agent: "orchestrator", action: "read", resources: [file],
@@ -534,17 +562,19 @@ export class SwarmController {
         sessions: Object.fromEntries(["builder", ...mandatory].map(role => [role, id("ses")])),
         jobs: [], findings: [], reports: {}, history: [], candidate: null,
         triageRequest: null, triage: null, reportRequest: null, htmlReport: null,
+        rootIdleID: (await this.messages(sessionID, "idle"))[0]?.id ?? null,
       };
+      this.runtime.bind(this.run.id);
       await this.requestPlan();
       await this.save();
       await this.flush();
       return this.run;
-    });
+    }, signal, true);
   }
 
   async tool(name, input, sessionID, signal) {
     validate(inputs[name], input);
-    if (name === "start") return this.start(sessionID, input.task, {}, input.plan);
+    if (name === "start") return this.start(sessionID, input.task, {}, input.plan, signal);
     // Tool calls can already be queued behind a resume transaction when their
     // old execution is interrupted. Bind them before acquiring the lock.
     const admitted = ["candidate", "report"].includes(name)
@@ -629,16 +659,44 @@ export class SwarmController {
       await this.save();
       await this.flush();
       return this.run;
-    });
+    }, signal);
   }
 
-  async control(sessionID, command) {
+  async control(sessionID, command, { runID, signal, operatorID } = {}) {
+    signal?.throwIfAborted();
+    let cancelling;
+    if (["cancel", "interrupt"].includes(command)) {
+      // Authorize before preemption, without waiting for the controller queue.
+      const run = await this.ctx.storage.get(this.key);
+      requireThat(run?.root === sessionID, "This session cannot cancel this run.");
+      requireThat(!runID || run.id === runID, "The run changed; select the current run and retry.");
+      cancelling = run.id;
+      const session = await this.ctx.session.get({ sessionID });
+      requireThat(session.location?.directory === run.location, "A managed session moved to another location.");
+      signal?.throwIfAborted();
+      this.runtime.interrupt(cancelling);
+    }
     return this.locked(async () => {
       requireThat(this.run, "No swarm run exists in this checkout.");
-      await this.authorize(sessionID, ["orchestrator"], command === "cancel");
+      requireThat(!runID || this.run.id === runID, "The run changed; select the current run and retry.");
+      requireThat(!cancelling || this.run.id === cancelling,
+        "The run changed while cancellation was being authorized; select the current run and retry.");
+      await this.authorize(sessionID, ["orchestrator"], ["cancel", "interrupt"].includes(command));
+      if (operatorID) {
+        requireThat(!this.run.operatorStop || this.run.operatorStop.id === operatorID,
+          "Another operator stop is in progress; inspect and retry.");
+        this.run.operatorStop = { id: operatorID, action: command, created: this.now() };
+      }
       if (command === "cancel") {
-        await this.block("Cancelled by the user. No approval was issued.", "CANCELLED");
+        await this.block("Cancelled by the user. No approval was issued.", "CANCELLED", false);
+      } else if (command === "interrupt") {
+        requireThat(!terminal(this.run.phase) || this.run.phase === "BLOCKED",
+          "Only an active or blocked run can be interrupted.");
+        await this.block("Interrupted by the operator. Resume explicitly after checking stopped sessions.",
+          "BLOCKED", false);
       } else if (command === "resume") {
+        requireThat(!this.run.operatorStop,
+          "An operator stop is awaiting confirmation. Retry oc2-swarms interrupt/cancel first.");
         requireThat(this.run.phase === "BLOCKED", "Only a blocked run can resume.");
         requireThat(this.run.plan, "This legacy run has no plan. Start a new /swarm --plan <path> run.");
         this.run.plan = await this.loadPlan(this.run.plan.reference ?? this.run.plan.path);
@@ -653,6 +711,7 @@ export class SwarmController {
         requireThat(this.run.stopFailures.length === 0,
           "Cannot resume: prior child turns could not be confirmed stopped. Retry after resolving stopFailures.");
         this.run.reason = null;
+        this.run.rootIdleID = (await this.messages(sessionID, "idle"))[0]?.id ?? null;
         if (this.run.plan && this.run.planReview?.approved !== this.requirementsDigest()) {
           await this.requestPlan();
         } else if (reportResume) {
@@ -670,7 +729,7 @@ export class SwarmController {
       await this.save();
       await this.flush();
       return this.run;
-    });
+    }, signal);
   }
 
   async externalPrompt(sessionID, messageID, prompt, metadata) {
@@ -703,6 +762,15 @@ export class SwarmController {
     return this.locked(async () => {
       if (!this.run) return;
       const root = await this.ctx.session.get({ sessionID: this.run.root });
+      if (!terminal(this.run.phase) && root.outcome === "interrupted" &&
+        !(root.time.busy > (root.time.idle ?? 0))) {
+        const idle = (await this.messages(this.run.root, "idle"))[0];
+        if (idle && idle.id !== this.run.rootIdleID) {
+          await this.block("Orchestrator interrupted. Resume explicitly after checking the stopped participants.",
+            "BLOCKED", false);
+          return;
+        }
+      }
       if (!terminal(this.run.phase) && (root.agent !== "orchestrator" ||
         root.location.directory !== this.run.location)) {
         await this.block("The orchestrator changed agent or location.");
@@ -791,6 +859,8 @@ export class SwarmController {
     return {
       role, phase: run?.phase,
       submitted: role ? run.jobs.findLast(job => job.role === role)?.done : false,
+      dispatchTargets: run ? ["builder", ...(run.workflow
+        ? Object.keys(run.workflow.reviewers) : [...requiredReviewers(run), uiReviewer])] : [],
     };
   }
 

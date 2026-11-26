@@ -212,6 +212,36 @@ the run. After implementation starts, new user input blocks the run until
 resumed so changed requirements cannot retain old approvals.
 The default agent remains Plan and ordinary Build behavior is unchanged.
 
+For operator recovery without an agent, use the terminal utility:
+
+```sh
+oc2-swarms list
+oc2-swarms list --all
+oc2-swarms inspect <run-or-session-id>
+oc2-swarms interrupt <run-or-session-id>
+oc2-swarms resume <run-or-session-id>
+oc2-swarms cancel <run-or-session-id>
+oc2-swarms help interrupt
+```
+
+`--help`, `help <command>` and `<command> --help` explain each subcommand,
+examples, options and exit codes without connecting to OpenCode.
+Listing/inspection do not start model turns. Interrupt blocks the run, cancels
+queued input, and stops its root and descendants; resume continues a blocked run.
+Cancel preserves code/history but requires an explicit new swarm afterward.
+`start` aliases resume; `kill` aliases cancel, never session deletion or shared
+server termination. Incomplete stops keep a durable operator fence; retry
+interrupt/cancel before resuming or starting another run.
+`--json`, `--directory <checkout>` and `--timeout-seconds <n>` support scripts.
+Exit codes: 0 confirmed, 1 failed/invalid, 2 incomplete or unavailable.
+Discovery covers the current service's loaded checkouts and active swarm
+sessions, not archived/unloaded history or other independent servers.
+If the plugin is unavailable, `interrupt <root-session-id>` can use native
+session controls and reports exit 2 because ledger state is unconfirmed.
+The utility uses the installed `opencode2` CLI for service discovery and
+authentication; `OPENCODE_SWARMS_BIN` selects another compatible executable.
+It needs a running service and never deletes the database or installs packages.
+
 See [the Swarm plugin guide](home/.config/opencode/plugins/swarm/README.md)
 for test-engineer responsibilities, recovery, permissions, and limitations.
 The plugin enforces its approval state; it cannot veto a model's final prose
@@ -223,6 +253,7 @@ These tests use temporary homes and require no downloads or provider requests:
 
 ```bash
 node --test scripts/opencode-profile.test.mjs
+node --test scripts/opencode-swarms.test.mjs
 bash scripts/test-links.sh
 node --test home/.config/opencode/plugins/go-usage/test/usage-core.test.js
 node --test home/.config/opencode/plugins/openai-usage/test/*.test.js
